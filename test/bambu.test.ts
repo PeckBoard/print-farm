@@ -56,6 +56,15 @@ describe("bambu via print-bridge", () => {
     expect(t.calls[0]).toMatchObject({ url: "http://127.0.0.1:7781/printers/p4/upload?name=cube.gcode.3mf", bodyFile: "/s/f2-cube.gcode.3mf" });
     expect(JSON.parse(t.calls[1].body!)).toEqual({ file: "cube.gcode.3mf", plate: 1, use_ams: true, bed_leveling: true });
   });
+  it("sends the AMS mapping and reads loaded spools from the status", () => {
+    const ams = { trays: [{ slot: 2, unit: 0, tray: 2, type: "PLA", color: "161616FF" }], external: { type: "ASA", color: null } };
+    const t = new FakeTransport([["POST /printers/p4/start", json({ ok: true })], ["GET /printers/p4/status", json({ ...STATUS, ams })]]);
+    const d = bambuDriver(P, t, BRIDGE);
+    d.start("cube.gcode.3mf", { use_ams: true, ams_mapping: [2] });
+    expect(JSON.parse(t.calls[0].body!)).toEqual({ file: "cube.gcode.3mf", plate: 1, use_ams: true, bed_leveling: true, ams_mapping: [2] });
+    expect(d.status().ams).toEqual(ams);
+  });
+
 
   it("maps cancel to /stop and a 404 snapshot to null", () => {
     const t = new FakeTransport([["POST /printers/p4/stop", json({ ok: true })], ["GET /printers/p4/snapshot", { status: 404 }]]);

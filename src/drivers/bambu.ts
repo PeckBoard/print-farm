@@ -5,13 +5,14 @@
 //   DELETE /printers/{id}
 //   GET  /printers/{id}/status         → normalised status
 //   POST /printers/{id}/upload?name=   raw body → {ok}
-//   POST /printers/{id}/start          {file, plate?, use_ams?, bed_leveling?}
+//   POST /printers/{id}/start          {file, plate?, use_ams?, bed_leveling?, ams_mapping?}
 //   POST /printers/{id}/pause | /resume | /stop
 //   GET  /printers/{id}/snapshot       → image/jpeg (404 = no camera)
 
 import { Transport, HttpReq, jsonBody, expectOk } from "../transport";
 import { base64ToUtf8 } from "../b64";
 import { PrinterDriver, PrinterRecord, PrinterStatus, emptyStatus, num, clamp01, Snapshot, StartOptions, PrinterState } from "./types";
+import { coerceAms } from "../ams";
 
 export interface BridgeConfig {
   url: string;
@@ -36,6 +37,8 @@ export function coerceStatus(v: any): PrinterStatus {
     if (num(t[k]?.actual) !== null) st.temps[k] = { actual: t[k].actual, target: num(t[k].target) ?? 0 };
   }
   if (num(t.chamber?.actual) !== null) st.temps.chamber = { actual: t.chamber.actual, target: num(t.chamber.target) };
+  const ams = coerceAms(v?.ams);
+  if (ams) st.ams = ams;
   return st;
 }
 
@@ -79,11 +82,9 @@ export function bambuDriver(p: PrinterRecord, t: Transport, bridge: BridgeConfig
       );
     },
     start(file, opts?: StartOptions) {
-      post(
-        "/start",
-        { file, plate: opts?.plate ?? 1, use_ams: opts?.use_ams ?? false, bed_leveling: opts?.bed_leveling ?? true },
-        "bridge start",
-      );
+      const body: Record<string, unknown> = { file, plate: opts?.plate ?? 1, use_ams: opts?.use_ams ?? false, bed_leveling: opts?.bed_leveling ?? true };
+      if (opts?.use_ams && Array.isArray(opts.ams_mapping) && opts.ams_mapping.length) body.ams_mapping = opts.ams_mapping;
+      post("/start", body, "bridge start");
     },
     pause() {
       post("/pause", {}, "bridge pause");

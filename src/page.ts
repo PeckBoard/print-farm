@@ -102,6 +102,12 @@ const CSS = `
   .secret-wrap input { padding-right: 112px; }
   .linkbtn { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; text-align: left; }
   .linkbtn:hover { text-decoration: underline; }
+  .spools { display: grid; gap: 8px; }
+  .spool { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 6px 10px; align-items: center; }
+  .spool .fil { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text2); }
+  .spool .pick { display: flex; align-items: center; gap: 7px; }
+  .spool .warnline { grid-column: 2; color: var(--warn); font-size: 11.5px; font-weight: 500; }
+  .swatch { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border-strong); flex: none; display: inline-block; }
 
   /* combobox */
   .combo { position: relative; }

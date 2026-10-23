@@ -125,13 +125,24 @@ const MCP_TOOLS = [
         file_id: { type: "string" },
         options: {
           type: "object",
-          description: "Bambu only: {plate?: number, use_ams?: boolean, bed_leveling?: boolean}.",
+          description:
+            "Bambu only: {plate?: number, use_ams?: boolean, bed_leveling?: boolean}. When the printer reports " +
+            "its AMS/external spool, use_ams follows the spool choice (see spools).",
           properties: {
             plate: { type: "integer" },
             use_ams: { type: "boolean" },
             bed_leveling: { type: "boolean" },
           },
           additionalProperties: false,
+        },
+        spools: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Bambu only, optional: the spool for each filament the plate uses, in filament order — " +
+            "\"ams:<slot>\" (global AMS tray, unit*4+tray, slot 0 = AMS 1 tray 1), \"external\" (external spool) " +
+            "or \"auto\". Omit to auto-match by filament type and colour (printer_status shows the loaded spools). " +
+            "The confirmation question tells the user which spools will be used.",
         },
         print_id: { type: "string", description: "Second call: the queued print's id." },
         confirmation_token: { type: "string", description: "Second call: the token from the first call." },

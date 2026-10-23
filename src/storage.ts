@@ -21,6 +21,7 @@ import { storageDirSetting } from "./config";
 import { nextSeq } from "./counter";
 import { utf8ToBase64 } from "./b64";
 import type { GcodeEstimate } from "./gcode";
+import type { Filament } from "./ams";
 
 // ── shell helper ────────────────────────────────────────────────────────────
 
@@ -158,6 +159,9 @@ export interface FileRecord {
   slice_job?: string;
   /// G-code estimates (see gcode.ts).
   estimate?: GcodeEstimate;
+  /// .gcode.3mf: filaments used per plate (key = plate index), from
+  /// Metadata/slice_info.config or the slice's filament preset (spools.ts).
+  filaments?: Record<string, Filament[]>;
 }
 
 export function newFileRecord(name: string, source: FileRecord["source"]): FileRecord {

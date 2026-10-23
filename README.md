@@ -235,6 +235,22 @@ session), the print stays queued and the user presses Start on the page
 (`POST prints/:id/start`). UI-initiated prints (`POST print {start:true}`) start
 directly: the click is the confirmation.
 
+## AMS Spools (Bambu)
+
+print-bridge >= 0.1.6 reports the loaded spools in its status (`ams.trays[]`
+with `slot = unit*4 + tray`, plus the `external` spool). The filaments a
+.gcode.3mf uses come from its `Metadata/slice_info.config` (recorded at slice
+time, else read from the file; fallback: the slice's filament preset). Each
+filament is auto-matched (`src/ams.ts`): an AMS tray of the same type (nearest
+colour), else the external spool of that type, else the nearest type with a
+warning. The result becomes `use_ams` + `ams_mapping` (index = filament id - 1,
+-1 = unused, 254 = external in a mixed print). The send panel shows one
+spool picker per filament (preselected, mismatch warnings) and sends
+`spools: ["ams:<slot>" | "external"]` with `POST print`; `GET
+printers/:id/spools/:file?plate=` serves the picker. `print_start` takes the
+same optional `spools` (default auto) and names the spools in its
+confirmation question.
+
 ## Drivers
 
 | Type        | Status                                              | Upload                                   | Start / control                                        | Snapshot |

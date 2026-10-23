@@ -33,6 +33,7 @@ import { startSlice, pollSlice, listJobs, orcaDiagnostics } from "./slice";
 import { uploadForPrint, startPrint, dismissPrint, listPrints, getPrint, publicJob } from "./prints";
 import { autoFill } from "./autoprofiles";
 import { ensureSetup, invalidateSetup, syncSerials, SetupName } from "./setup";
+import { planSpools, spoolChoices, withSpools } from "./spools";
 
 export const PAGE_PATH = "/plugin-api/v1/print-farm";
 export const API = "/api/plugin-ui/print-farm";
@@ -248,8 +249,28 @@ export const ROUTES: Array<[string, Handler]> = [
     "POST print",
     ({ body }) => {
       const p = printerOr404(str(body?.printer_id));
-      const job = uploadForPrint(p, str(body?.file_id), "ui", body?.options);
+      const f = requireFile(str(body?.file_id));
+      const spools = Array.isArray(body?.spools) ? body.spools : null;
+      const { options, plan } = withSpools(p, f, body?.options, spools);
+      const job = uploadForPrint(p, f.id, "ui", options, plan?.summary);
       return { print: publicJob(body?.start === true ? startPrint(p, job) : job) };
+    },
+  ],
+  [
+    // Bambu: the file's filaments, the loaded spools and the auto-match, for
+    // the send panel's spool pickers. `applicable: false` → no picker.
+    "GET printers/:id/spools/:file",
+    ({ params, query }) => {
+      const p = printerOr404(params.id);
+      const f = requireFile(params.file);
+      const plan = planSpools(p, f, Math.max(1, Number(queryParam(query, "plate")) || 1));
+      if (!plan) return { applicable: false };
+      return {
+        applicable: true,
+        filaments: plan.filaments,
+        matches: plan.matches.map((m) => ({ filament_id: m.filament.id, spool: m.spool, warning: m.warning ?? null })),
+        choices: spoolChoices(plan.ams),
+      };
     },
   ],
   ["GET prints", () => ({ prints: listPrints().map(publicJob) })],

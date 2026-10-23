@@ -71,6 +71,15 @@ export interface Print {
   requested_by: "ui" | "agent";
   status: string;
   error?: string;
+  /// Bambu: which spool each filament prints from.
+  spools?: string;
+}
+/// GET printers/:id/spools/:file — Bambu spool pickers (src/spools.ts).
+export interface SpoolInfo {
+  applicable: boolean;
+  filaments?: { id: number; type: string; color: string; used_g?: number }[];
+  matches?: { filament_id: number; spool: string; warning: string | null }[];
+  choices?: { value: string; label: string; type: string; color: string | null }[];
 }
 export interface Diagnostics {
   orca: {

@@ -22,6 +22,7 @@ import {
 import { askUser, getAnswer } from "./host";
 import { PrinterRecord } from "./drivers/types";
 import { ensureSetupQuiet, SetupView } from "./setup";
+import { withSpools } from "./spools";
 
 /// A one-line note for an agent while an automatic install runs/failed.
 function setupNote(what: string, v: SetupView | null | undefined): string | null {
@@ -126,14 +127,24 @@ export function printStart(args: any): unknown {
   // Phase 1: upload + queue + ask.
   const p = resolvePrinter(args.printer);
   const f = requireFile(s(args.file_id));
-  const options = args.options && typeof args.options === "object" ? args.options : undefined;
-  const job = uploadForPrint(p, f.id, "agent", options);
+  const requested = args.options && typeof args.options === "object" ? args.options : undefined;
+  const choices = Array.isArray(args.spools) ? args.spools : null;
+  if (choices && p.type !== "bambu") throw new Error("spools only applies to Bambu printers");
+  const { options, plan } = withSpools(p, f, requested, choices);
+  const job = uploadForPrint(p, f.id, "agent", options, plan?.summary);
   const token = newToken();
   const queued = { ...job, status: "awaiting_confirmation" as const, token };
   putPrint(queued);
+  const spoolLine = plan
+    ? ` Spools: ${plan.summary}.`
+    : p.type === "bambu"
+      ? options?.use_ams
+        ? " Spools: AMS (the printer reported no tray details)."
+        : " Spool: the external spool (the printer reported no AMS)."
+      : "";
   try {
     askUser(
-      `Start printing "${f.name}" on ${p.name} (${p.type})? This moves the printer — make sure the bed is clear.`,
+      `Start printing "${f.name}" on ${p.name} (${p.type})?${spoolLine} This moves the printer — make sure the bed is clear.`,
       [CONFIRM_LABEL, DECLINE_LABEL],
       token,
     );

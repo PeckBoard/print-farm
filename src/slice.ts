@@ -28,6 +28,14 @@ import { parseGcodeEstimate, GcodeEstimate } from "./gcode";
 import { resolveProfile, isBambuMachine, makeCliCompatible } from "./profiles";
 import { sliceableModel } from "./threemf";
 import { getPrinter } from "./printers";
+import { readFilaments } from "./spools";
+import { normColor } from "./ams";
+
+/// First element of a preset value (`["PLA"]` or `"PLA"`), trimmed.
+function first(v: unknown): string {
+  const x = Array.isArray(v) ? v[0] : v;
+  return typeof x === "string" ? x.trim() : "";
+}
 
 export type SliceTarget = "gcode" | "gcode.3mf";
 
@@ -43,6 +51,9 @@ export interface SliceJob {
   command: string[];
   result_file_id?: string;
   estimate?: GcodeEstimate;
+  /// The filament preset's type/colour: the spool-matching fallback when the
+  /// result's slice_info can't be read.
+  filament?: { type: string; color: string };
   error?: string;
   log_tail?: string;
 }
@@ -302,6 +313,8 @@ export function startSlice(req: SliceRequest): SliceJob {
     command,
   };
   if (printer) job.printer_id = printer.id;
+  const ft = first(presets.filament.filament_type);
+  if (ft) job.filament = { type: ft, color: normColor(first(presets.filament.default_filament_colour)) };
   putJob(job);
   return job;
 }
@@ -337,6 +350,11 @@ export function pollSlice(id: string): SliceJob {
     const size = sh('mv -- "$1" "$2" && wc -c < "$2"', [src, rec.path], 60).trim();
     const done: FileRecord = { ...rec, size: Number(size) || 0, complete: true, slice_job: job.id };
     done.estimate = estimateFor(done, `${job.dir}/out`);
+    if (job.target === "gcode.3mf") {
+      const fil = readFilaments(done.path);
+      if (Object.keys(fil).length) done.filaments = fil;
+      else if (job.filament) done.filaments = { "1": [{ id: 1, ...job.filament }] };
+    }
     putFile(done);
     next.result_file_id = done.id;
     next.estimate = done.estimate;

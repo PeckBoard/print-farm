@@ -1,6 +1,8 @@
 // The normalised printer model every driver maps onto. The UI and the
 // print-bridge sidecar use exactly this status shape.
 
+import type { AmsState } from "../ams";
+
 export type PrinterType = "moonraker" | "octoprint" | "prusalink" | "bambu";
 
 export type PrinterState = "idle" | "printing" | "paused" | "finished" | "error" | "offline";
@@ -24,6 +26,8 @@ export interface PrinterStatus {
     chamber?: { actual: number; target: number | null };
   };
   message: string | null;
+  /// Bambu only: loaded AMS trays + external spool (print-bridge >= 0.1.6).
+  ams?: AmsState | null;
 }
 
 export interface StartOptions {
@@ -31,6 +35,8 @@ export interface StartOptions {
   plate?: number;
   /// Bambu only.
   use_ams?: boolean;
+  /// Bambu only: per filament (id - 1) the global AMS tray, -1 unused.
+  ams_mapping?: number[];
   /// Bambu only.
   bed_leveling?: boolean;
 }

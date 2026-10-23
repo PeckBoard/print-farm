@@ -31,6 +31,8 @@ export interface PrintJob {
   status: PrintStatus;
   requested_by: "ui" | "agent";
   options?: StartOptions;
+  /// Bambu: which spool each filament prints from (spools.ts summary).
+  spools?: string;
   /// Agent confirmations: the ask_user token (never shown to the UI).
   token?: string;
   error?: string;
@@ -94,7 +96,7 @@ function remoteName(f: FileRecord): string {
 }
 
 /// Upload a stored file to a printer and record a print job.
-export function uploadForPrint(printer: PrinterRecord, fileId: string, by: "ui" | "agent", options?: StartOptions): PrintJob {
+export function uploadForPrint(printer: PrinterRecord, fileId: string, by: "ui" | "agent", options?: StartOptions, spools?: string): PrintJob {
   const f = requireFile(fileId);
   if (!f.complete) throw new Error(`file ${f.id} is still uploading`);
   checkCompatible(printer.type, f.kind);
@@ -107,6 +109,7 @@ export function uploadForPrint(printer: PrinterRecord, fileId: string, by: "ui" 
     requested_by: by,
   };
   if (options) job.options = options;
+  if (spools) job.spools = spools;
   try {
     driverFor(printer, defaultTransport, bridgeConfig()).upload(job.remote_name, { path: f.path });
   } catch (e) {

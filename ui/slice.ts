@@ -4,7 +4,7 @@
 
 import { h, clear, icon, btn, toast, errText, confirmDialog, select, field } from "./dom";
 import { get, post, del, bytesToB64, b64ToBytes, openPluginPage } from "./api";
-import { state, FileRec, SliceJob, Print, Printer, Diagnostics, Status, printerById, loadPrinters, SETUP_DONE, SETUP_CHANGED, orcaSetupMessage } from "./state";
+import { state, FileRec, SliceJob, Print, Printer, Diagnostics, Status, SpoolInfo, printerById, loadPrinters, SETUP_DONE, SETUP_CHANGED, orcaSetupMessage } from "./state";
 import { fmtBytes, fmtDuration, fmtFilament, accepts, previewKind, TYPE_SHORT } from "./format";
 import { parseGcode, ParsedGcode } from "./gcode";
 import { Viewer, ViewerTheme, webglAvailable } from "./viewer";
@@ -759,11 +759,79 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     const plate = h("input", { type: "number", min: "1", max: "16", value: "1", id: "pf-plate", style: { width: "70px" } }) as HTMLInputElement;
     const ams = h("input", { type: "checkbox", id: "pf-ams" }) as HTMLInputElement;
     const level = h("input", { type: "checkbox", id: "pf-level", checked: true }) as HTMLInputElement;
-    bambuOpts.append(
-      h("label", { class: "check", for: "pf-plate" }, "Plate", plate),
-      h("label", { class: "check", for: "pf-ams" }, ams, "Use AMS"),
-      h("label", { class: "check", for: "pf-level" }, level, "Bed leveling"),
-    );
+    const amsLabel = h("label", { class: "check", for: "pf-ams" }, ams, "Use AMS");
+    bambuOpts.append(h("label", { class: "check", for: "pf-plate" }, "Plate", plate), amsLabel, h("label", { class: "check", for: "pf-level" }, level, "Bed leveling"));
+    // Bambu with an AMS: one spool picker per used filament, preselected with
+    // the auto-match (replaces the "Use AMS" checkbox).
+    const spoolHost = h("div", { class: "spools", id: "pf-spools" });
+    spoolHost.hidden = true;
+    let spoolSels: HTMLSelectElement[] | null = null;
+    let spoolSeq = 0;
+    const swatchBg = (c: string | null | undefined) => {
+      const m = /^#?([0-9a-f]{6})/i.exec(c || "");
+      return m ? "#" + m[1] : "transparent";
+    };
+    const renderSpools = (r: SpoolInfo) => {
+      clear(spoolHost);
+      if (!r.applicable || !r.filaments || !r.choices) {
+        spoolHost.hidden = true;
+        amsLabel.hidden = false;
+        return;
+      }
+      const choices = r.choices;
+      amsLabel.hidden = true;
+      spoolHost.hidden = false;
+      spoolSels = [];
+      spoolHost.append(h("span", { class: "reason", text: "Spools — matched to the loaded filament by type and colour. Change one if it's wrong." }));
+      for (const fil of r.filaments) {
+        const m = r.matches?.find((x) => x.filament_id === fil.id);
+        const s = select(`pf-spool-${fil.id}`, choices.map((c) => ({ value: c.value, label: c.label })), m?.spool ?? choices[0].value);
+        const sw = h("span", { class: "swatch" });
+        const warn = h("div", { class: "warnline", role: "status" });
+        const upd = () => {
+          const c = choices.find((x) => x.value === s.value);
+          sw.style.background = swatchBg(c?.color);
+          let w = "";
+          if (!c?.type) w = "The printer reports nothing loaded here.";
+          else if (!fil.type) w = "The file doesn't say which filament type it needs — check the spool.";
+          else if (c.type.trim().toUpperCase() !== fil.type.trim().toUpperCase()) w = `Type mismatch: the print needs ${fil.type}, this spool holds ${c.type}.`;
+          warn.textContent = w ? "⚠ " + w : "";
+          warn.hidden = !w;
+        };
+        s.addEventListener("change", upd);
+        upd();
+        spoolSels.push(s);
+        spoolHost.append(
+          h(
+            "div",
+            { class: "spool" },
+            h("label", { class: "fil", for: s.id }, h("span", { class: "swatch", style: { background: swatchBg(fil.color) } }), `Filament ${fil.id} · ${fil.type || "unknown"}`),
+            h("div", { class: "pick" }, sw, s),
+            warn,
+          ),
+        );
+      }
+    };
+    const loadSpools = () => {
+      const p = printerById(sel.value);
+      const my = ++spoolSeq;
+      spoolSels = null;
+      clear(spoolHost);
+      spoolHost.hidden = true;
+      amsLabel.hidden = false;
+      if (!p || p.type !== "bambu" || !f.complete || f.kind !== "gcode.3mf") return;
+      spoolHost.hidden = false;
+      spoolHost.append(h("span", { class: "reason", text: "Reading the loaded spools…" }));
+      const plateNo = Math.max(1, Number(plate.value) || 1);
+      get<SpoolInfo>(`printers/${encodeURIComponent(p.id)}/spools/${encodeURIComponent(f.id)}?plate=${plateNo}`)
+        .then((r) => my === spoolSeq && renderSpools(r))
+        .catch((e) => {
+          if (my !== spoolSeq) return;
+          clear(spoolHost);
+          spoolHost.append(h("span", { class: "reason", text: `Couldn't read the printer's spools: ${errText(e)}` }));
+        });
+    };
+    plate.addEventListener("change", loadSpools);
     const upBtn = btn("Upload only", { icon: "upload" });
     const goBtn = btn("Upload & start", { icon: "play", cls: "primary" });
     const reason = h("span", { class: "reason" });
@@ -782,11 +850,16 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       }
       reason.textContent = why;
     };
-    sel.addEventListener("change", sync);
+    sel.addEventListener("change", () => {
+      sync();
+      loadSpools();
+    });
     sync();
+    loadSpools();
     const send = async (start: boolean) => {
       const p = printerById(sel.value);
       if (!p) return;
+      const chosen = p.type === "bambu" && spoolSels ? spoolSels : null;
       if (start) {
         const ok = await confirmDialog({
           title: "Start printing?",
@@ -794,6 +867,9 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
             "div",
             { class: "stack" },
             h("p", { text: `This will start the printer “${p.name}” printing ${f.name}.` }),
+            chosen
+              ? h("p", { text: "Spools: " + chosen.map((s, i) => `filament ${i + 1} → ${s.selectedOptions[0]?.textContent ?? s.value}`).join("; ") + "." })
+              : null,
             h("p", { text: "Make sure the build plate is clear and the right filament is loaded." }),
           ),
           confirm: "Upload & start",
@@ -804,7 +880,9 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       reason.textContent = `Uploading to ${p.name}…`;
       try {
         const options = p.type === "bambu" ? { plate: Math.max(1, Number(plate.value) || 1), use_ams: ams.checked, bed_leveling: level.checked } : undefined;
-        const r = await post<{ print: Print }>("print", { printer_id: p.id, file_id: f.id, start, options });
+        const body: Record<string, unknown> = { printer_id: p.id, file_id: f.id, start, options };
+        if (chosen) body.spools = chosen.map((s) => s.value);
+        const r = await post<{ print: Print }>("print", body);
         if (start) toast(`Started ${f.name} on ${p.name}.`, "ok");
         else toast(`Uploaded to ${p.name}. It's waiting on the Farm tab — press Start when the plate is clear.`, "ok");
         state.prints.unshift(r.print);
@@ -816,7 +894,7 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     };
     upBtn.onclick = () => send(false);
     goBtn.onclick = () => send(true);
-    wrap.append(field("Printer", sel, { forId: sel.id }).el, bambuOpts, h("div", { class: "row" }, upBtn, goBtn), reason);
+    wrap.append(field("Printer", sel, { forId: sel.id }).el, bambuOpts, spoolHost, h("div", { class: "row" }, upBtn, goBtn), reason);
     return wrap;
   }
 
