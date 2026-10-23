@@ -20,7 +20,7 @@
 // `LD_LIBRARY_PATH=<install>/extra-lib` — where setup.ts drops the host
 // libraries it fetched rootless (the binary's RUNPATH is a CI build dir).
 
-import { storeGet, storePut, storeList } from "./host";
+import { storeGet, storePut, storeList, storePutIfAbsent } from "./host";
 import { nextSeq } from "./counter";
 import { orcaPath, orcaHeadless, DEFAULT_ORCA_PATH } from "./config";
 import { sh, storageDir, requireFile, newFileRecord, putFile, headTail, FileRecord, writeText, JOB_HEARTBEAT, JOB_ALIVE } from "./storage";
@@ -324,6 +324,8 @@ export function pollSlice(id: string): SliceJob {
   const p = parsePoll(sh(POLL, [job.dir, String(job.pid)], 30));
   const outcome = settle(p, job.target);
   if (outcome.status === "running") return { ...job, log_tail: p.logTail.slice(-1500) };
+  // The page and an agent can poll the same job at once: one settles it.
+  if (!storePutIfAbsent("slice_settle", id, 1)) return { ...job, log_tail: p.logTail.slice(-1500) };
   const next: SliceJob = { ...job, status: outcome.status, log_tail: p.logTail.slice(-1500) };
   if (outcome.status === "failed") {
     next.error = outcome.error;

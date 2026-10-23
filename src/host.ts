@@ -36,6 +36,11 @@ export function storeGet(collection: string, key: string): any {
   return result?.value ?? null;
 }
 
+/// Atomic create: true when this call wrote the row, false when it existed.
+/// `ttlSecs` > 0 lets a call steal a row older than that (a stale lock).
+export function storePutIfAbsent(collection: string, key: string, data: unknown, ttlSecs = 0): boolean {
+  return hostCall("peckboard_store_put_if_absent", { collection, key, data, ttl_secs: ttlSecs })?.acquired === true;
+}
 export function storeList(collection: string): Array<{ key: string; value: any }> {
   const result = hostCall("peckboard_store_list", { collection });
   return result?.items ?? [];

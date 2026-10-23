@@ -21,6 +21,8 @@ vi.mock("../src/host", () => ({
   storePut: (c: string, k: string, v: unknown) => void store.set(`${c}/${k}`, JSON.parse(JSON.stringify(v))),
   storeGet: (c: string, k: string) => store.get(`${c}/${k}`) ?? null,
   storeDelete: (c: string, k: string) => void store.delete(`${c}/${k}`),
+  storePutIfAbsent: (c: string, k: string, v: unknown) =>
+    store.has(`${c}/${k}`) ? false : (store.set(`${c}/${k}`, JSON.parse(JSON.stringify(v))), true),
   storeList: (c: string) =>
     [...store.entries()].filter(([k]) => k.startsWith(c + "/")).map(([k, value]) => ({ key: k.slice(c.length + 1), value })),
   execAny: (command: string, args: string[], timeout?: number) => {

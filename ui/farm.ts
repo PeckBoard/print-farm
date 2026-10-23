@@ -397,12 +397,20 @@ export function farmView(goPrinters: (addNew: boolean) => void, onQueueCount: (n
         c.age.textContent = "live · " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       } catch (e) {
         const msg = errText(e);
-        c.img.hidden = true;
-        c.age.hidden = true;
         if (/no camera/i.test(msg)) {
+          c.img.hidden = true;
+          c.age.hidden = true;
           c.noCamUntil = Date.now() + 60000;
           setCamMsg(c, "No camera configured");
-        } else setCamMsg(c, "Camera unavailable");
+        } else if (c.img.getAttribute("src")) {
+          // Keep the last frame up; say it's stale rather than blanking it.
+          c.age.textContent = c.age.textContent.replace(/^live/, "last frame");
+        } else {
+          c.img.hidden = true;
+          c.age.hidden = true;
+          // Keep polling: each request keeps the bridge's camera stream open.
+          setCamMsg(c, /connecting/i.test(msg) ? "Camera connecting… the first frame can take a minute on weak Wi-Fi" : `Camera unavailable: ${msg}`);
+        }
       }
     }
     snapTimer = window.setTimeout(snapLoop, 1000);

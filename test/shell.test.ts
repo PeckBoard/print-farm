@@ -16,6 +16,8 @@ vi.mock("../src/host", () => ({
   storePut: (c: string, k: string, v: unknown) => void store.set(`${c}/${k}`, JSON.parse(JSON.stringify(v))),
   storeGet: (c: string, k: string) => store.get(`${c}/${k}`) ?? null,
   storeDelete: (c: string, k: string) => void store.delete(`${c}/${k}`),
+  storePutIfAbsent: (c: string, k: string, v: unknown) =>
+    store.has(`${c}/${k}`) ? false : (store.set(`${c}/${k}`, JSON.parse(JSON.stringify(v))), true),
   storeList: (c: string) =>
     [...store.entries()].filter(([k]) => k.startsWith(c + "/")).map(([k, value]) => ({ key: k.slice(c.length + 1), value })),
   execAny: (command: string, args: string[], timeout?: number) => {
@@ -48,7 +50,11 @@ beforeAll(() => {
   // A tiny vendor tree with an inherits chain per kind.
   mkdirSync(prof, { recursive: true });
   writeFileSync(join(prof, "Acme.json"), "{}");
-  writeJson(join(prof, "Acme/machine/fdm_machine_common.json"), { type: "machine", name: "fdm_machine_common", instantiation: "false", nozzle_diameter: ["0.4"] });
+  writeJson(join(prof, "Acme/machine/fdm_machine_common.json"), { type: "machine", name: "fdm_machine_common", instantiation: "false", nozzle_diameter: ["0.4"], gcode_flavor: "marlin" });
+  // Same base name under other vendors, with different values.
+  for (const v of ["Aardvark", "Mango", "Zebra"]) {
+    writeJson(join(prof, `${v}/machine/fdm_machine_common.json`), { type: "machine", name: "fdm_machine_common", instantiation: "false", gcode_flavor: "klipper" });
+  }
   writeJson(join(prof, "Acme/machine/Acme One 0.4 nozzle.json"), { type: "machine", name: "Acme One 0.4 nozzle", inherits: "fdm_machine_common", instantiation: "true", printer_model: "Acme One" });
   writeJson(join(prof, "Acme/machine/Acme One.json"), { type: "machine_model", name: "Acme One" });
   writeJson(join(prof, "Acme/process/0.20mm Standard @Acme.json"), { type: "process", name: "0.20mm Standard @Acme", instantiation: "true", layer_height: "0.2" });
@@ -92,13 +98,18 @@ describe("profile scan + resolve", () => {
   it("lists vendors and instantiable presets, resolving inherits from disk", () => {
     const roots = detectRoots();
     expect(roots[0]).toEqual({ kind: "system", path: join(ROOT, "profiles") });
-    expect(listVendors([roots[0]])).toEqual(["Acme"]);
+    expect(listVendors([roots[0]])).toEqual(["Aardvark", "Acme", "Mango", "Zebra"]);
     const printers = scanProfiles([roots[0]], "Acme", "printer", true);
     expect(printers.map((p) => p.name).sort()).toEqual(["Acme One 0.4 nozzle", "fdm_machine_common"]); // machine_model filtered
     const fil = scanProfiles([roots[0]], "Acme", "filament", true);
     expect(fil.find((f) => f.name === "Acme PLA")).toMatchObject({ inherits: "fdm_filament_pla", instantiable: true });
     const r = resolveProfile("Acme PLA", "filament", "Acme");
     expect(r.profile).toMatchObject({ name: "Acme PLA", nozzle_temperature: ["210"], type: "filament" });
+    expect(r.vendor).toBe("Acme");
+  });
+  it("resolves a parent in the child's own vendor, not another vendor's same-named base", () => {
+    const r = resolveProfile("Acme One 0.4 nozzle", "printer");
+    expect(r.profile).toMatchObject({ gcode_flavor: "marlin", nozzle_diameter: ["0.4"] });
     expect(r.vendor).toBe("Acme");
   });
 });

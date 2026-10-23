@@ -179,6 +179,10 @@ export function manifestJson(): string {
     // profile scan walks thousands of JSON files: stay well past the extism
     // default but under core's MAX_CALL_TIMEOUT (610s).
     call_timeout_secs: 600,
+    // A camera grab or printer upload over a weak link takes 15–600 s; with
+    // one instance every page call (file list, status) queued behind it.
+    // Ids and install launches are claimed atomically (counter.ts, setup.ts).
+    concurrency: 4,
     hooks: ["mcp.tool.invoke", "http.request.before", "http.request.authed"],
     permissions: [
       "provide_mcp_tools", // printer_* / slice_* / print_* tools

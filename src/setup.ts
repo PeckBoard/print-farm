@@ -16,7 +16,7 @@
 // the page; nothing needs a click. A failed install is not retried
 // automatically for an hour (the page's Retry starts it at once).
 
-import { storeGet, storePut } from "./host";
+import { storeGet, storePut, storePutIfAbsent, storeDelete } from "./host";
 import { sh, storageDir, JOB_HEARTBEAT, JOB_ALIVE } from "./storage";
 import { detectRoots, invalidateRoots } from "./profiles";
 import { orcaProfilesDir, orcaPath, bridgeConfig, invalidateBridgeToken, DEFAULT_BRIDGE_URL, DEFAULT_ORCA_PATH } from "./config";
@@ -26,7 +26,7 @@ import { bridgeHealth, fetchBridgePrinters, serialFixes, registerWithBridge, Bri
 import { defaultTransport } from "./transport";
 import { PrinterRecord } from "./drivers/types";
 
-export const MIN_BRIDGE_VERSION = "0.1.3";
+export const MIN_BRIDGE_VERSION = "0.1.4";
 
 export type SetupName = "orca" | "bridge";
 
@@ -355,7 +355,14 @@ function getJob(name: SetupName): SetupJob | null {
   return (storeGet(JOBS, name) as SetupJob) ?? null;
 }
 
-function startJob(name: SetupName, reason: string, script: string = SCRIPTS[name]): SetupJob {
+const LOCKS = "setup_locks";
+const LAUNCH_LOCK_SECS = 60;
+
+/// Launch an install job. Calls run concurrently (manifest `concurrency`), so
+/// two page loads can both decide an install is needed; an atomic claim lets
+/// only one launch it — the loser reports whatever job is on record.
+function startJob(name: SetupName, reason: string, script: string = SCRIPTS[name]): SetupJob | null {
+  if (!storePutIfAbsent(LOCKS, name, Date.now(), LAUNCH_LOCK_SECS)) return getJob(name);
   const dir = `${storageDir()}/setup/${name}`;
   const pid = Number(sh(LAUNCH, [dir, script], 30).trim());
   const job: SetupJob = { name, status: "running", reason, dir, pid: isFinite(pid) ? pid : 0, started_at: Date.now() };
@@ -388,6 +395,7 @@ function pollJob(job: SetupJob): { job: SetupJob; view: SetupView } {
     if (exitCode === 3 && job.name === "bridge") next.no_systemd = true;
   }
   storePut(JOBS, job.name, next);
+  storeDelete(LOCKS, job.name); // settled: the next launch may claim it
   if (next.status === "succeeded") return { job: next, view: { status: "ok" } };
   return { job: next, view: { status: "failed", reason: next.reason, error: next.error, log_tail: next.log_tail, no_systemd: next.no_systemd } };
 }
@@ -499,6 +507,7 @@ export function invalidateSetup(): void {
 /// `force` = the page's Retry. Cheap when everything is in place (memoised).
 export function ensureSetup(force?: SetupName): SetupState {
   const now = Date.now();
+  if (force) storeDelete(LOCKS, force);
   if (!force && okMemo && now - okMemo < OK_TTL_MS) return { orca: { status: "ok" }, bridge: null, notices: [] };
 
   let orcaJob = getJob("orca");

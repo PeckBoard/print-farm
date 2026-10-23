@@ -429,17 +429,27 @@ export function resolveProfile(name: string, kind: ProfileKind, vendor?: string)
   if (vendor) search.push(vendor);
   search.push("User");
   if (kind === "filament") search.push("OrcaFilamentLibrary");
-  const indexes: ProfileEntry[][] = [];
-  const indexFor = (i: number) => (indexes[i] ??= scanProfiles(roots, search[i], kind));
+  const indexes = new Map<string, ProfileEntry[]>();
+  const indexFor = (v: string) => {
+    if (!indexes.has(v)) indexes.set(v, scanProfiles(roots, v, kind));
+    return indexes.get(v)!;
+  };
   const cache = new Map<string, Record<string, unknown> | null>();
   let leafVendor = vendor ?? "";
+  // A parent resolves in the vendor its child came from first: base presets
+  // (fdm_machine_common, fdm_filament_common, …) exist under every vendor
+  // with different values — another vendor's copy gave a Bambu P1S
+  // `gcode_flavor: klipper`.
+  let near = "";
   const lookup = (n: string): Record<string, unknown> | null => {
     if (cache.has(n)) return cache.get(n)!;
+    const order = near && near !== "User" && near !== "?" ? [near, ...search.filter((v) => v !== near)] : search;
     let entry: ProfileEntry | null = null;
-    for (let i = 0; i < search.length && !entry; i++) entry = indexFor(i).find((e) => e.name === n) ?? null;
+    for (let i = 0; i < order.length && !entry; i++) entry = indexFor(order[i]).find((e) => e.name === n) ?? null;
     if (!entry) entry = grepByName(roots, n, kind);
     const obj = entry ? readJson(entry.path) : null;
     if (obj && n === name && entry) leafVendor = entry.vendor;
+    if (entry) near = entry.vendor;
     cache.set(n, obj);
     return obj;
   };

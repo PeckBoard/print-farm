@@ -10,6 +10,7 @@
 //   GET  /printers/{id}/snapshot       → image/jpeg (404 = no camera)
 
 import { Transport, HttpReq, jsonBody, expectOk } from "../transport";
+import { base64ToUtf8 } from "../b64";
 import { PrinterDriver, PrinterRecord, PrinterStatus, emptyStatus, num, clamp01, Snapshot, StartOptions, PrinterState } from "./types";
 
 export interface BridgeConfig {
@@ -94,8 +95,21 @@ export function bambuDriver(p: PrinterRecord, t: Transport, bridge: BridgeConfig
       post("/stop", {}, "bridge stop");
     },
     snapshot(): Snapshot | null {
-      const img = req({ method: "GET", path: "/snapshot", binaryResponse: true, timeoutSecs: 15 });
-      if (img.status !== 200 || !img.bodyBase64) return null;
+      // The bridge keeps a camera stream open and answers from memory; while
+      // the first frame is still arriving (a minute+ on weak printer Wi-Fi)
+      // it answers 502 with the reason. Only 404 means "no camera".
+      const img = req({ method: "GET", path: "/snapshot?wait=10", binaryResponse: true, timeoutSecs: 15 });
+      if (img.status === 404) return null;
+      if (img.status !== 200 || !img.bodyBase64) {
+        let reason = `camera: bridge answered HTTP ${img.status}`;
+        try {
+          const body = JSON.parse(img.body || base64ToUtf8(img.bodyBase64 ?? ""));
+          if (body?.error) reason = String(body.error);
+        } catch (_e) {
+          /* not JSON */
+        }
+        throw new Error(reason);
+      }
       return { content_type: img.contentType || "image/jpeg", data_base64: img.bodyBase64 };
     },
     test() {
