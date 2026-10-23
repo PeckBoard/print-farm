@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildOrcaArgs, parsePoll, settle } from "../src/slice";
+import { buildOrcaArgs, parsePoll, settle, resolveOrca, parseKv } from "../src/slice";
 
 describe("orca command line", () => {
   it("builds a plain G-code slice", () => {
@@ -22,6 +22,38 @@ describe("orca command line", () => {
     expect(a[a.length - 1]).toBe("/m.3mf");
   });
 });
+describe("orca resolution", () => {
+  const S = "/data/print-farm";
+
+  it("uses the configured command when it is on PATH", () => {
+    expect(resolveOrca("orca-slicer", parseKv("path=/usr/bin/orca-slicer\nlocal=/h/.local/bin/orca-slicer"), S)).toEqual({
+      argv: ["orca-slicer"],
+      resolved: "/usr/bin/orca-slicer",
+      via: "path",
+    });
+  });
+
+  it("falls back to ~/.local/bin, then flatpak, for the default only", () => {
+    expect(resolveOrca("orca-slicer", parseKv("path=\nlocal=/h/.local/bin/orca-slicer\nflatpak=com.orcaslicer.OrcaSlicer"), S)?.argv).toEqual([
+      "/h/.local/bin/orca-slicer",
+    ]);
+    const fp = resolveOrca("orca-slicer", parseKv("path=\nflatpak=io.github.softfever.OrcaSlicer"), S);
+    expect(fp).toEqual({
+      argv: ["flatpak", "run", "--filesystem=/data/print-farm", "io.github.softfever.OrcaSlicer"],
+      resolved: "flatpak run io.github.softfever.OrcaSlicer",
+      via: "flatpak",
+    });
+    expect(buildOrcaArgs({ orca: fp!.argv, modelPath: "/m.stl", jobDir: "/j", target: "gcode" }).slice(0, 5)).toEqual([
+      "flatpak", "run", "--filesystem=/data/print-farm", "io.github.softfever.OrcaSlicer", "--arrange",
+    ]);
+  });
+
+  it("is null when nothing is found or a custom path is missing", () => {
+    expect(resolveOrca("orca-slicer", parseKv("path="), S)).toBeNull();
+    expect(resolveOrca("/opt/Orca.AppImage", parseKv("path=\nlocal=/h/.local/bin/orca-slicer"), S)).toBeNull();
+  });
+});
+
 
 describe("job polling", () => {
   const poll = (exit: string, alive: string, ls: string[], log = "", result = "") =>

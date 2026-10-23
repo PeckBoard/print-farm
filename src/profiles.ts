@@ -126,12 +126,16 @@ bin=$(command -v "$orca" 2>/dev/null) && bin=$(readlink -f "$bin" 2>/dev/null) &
 }
 for d in /usr/share/OrcaSlicer/resources/profiles /usr/local/share/OrcaSlicer/resources/profiles \\
   /opt/OrcaSlicer/resources/profiles /opt/orca-slicer/resources/profiles /app/share/OrcaSlicer/resources/profiles \\
+  /var/lib/flatpak/app/com.orcaslicer.OrcaSlicer/current/active/files/share/OrcaSlicer/resources/profiles \\
+  "$HOME/.local/share/flatpak/app/com.orcaslicer.OrcaSlicer/current/active/files/share/OrcaSlicer/resources/profiles" \\
   /var/lib/flatpak/app/io.github.softfever.OrcaSlicer/current/active/files/share/OrcaSlicer/resources/profiles \\
   "$HOME/.local/share/flatpak/app/io.github.softfever.OrcaSlicer/current/active/files/share/OrcaSlicer/resources/profiles" \\
-  "$HOME/.config/OrcaSlicer/system" "$HOME/.var/app/io.github.softfever.OrcaSlicer/config/OrcaSlicer/system"; do
+  "$HOME/.config/OrcaSlicer/system" "$HOME/.var/app/com.orcaslicer.OrcaSlicer/config/OrcaSlicer/system" \\
+  "$HOME/.var/app/io.github.softfever.OrcaSlicer/config/OrcaSlicer/system"; do
   emit system "$d"
 done
-for d in "$HOME/.config/OrcaSlicer/user" "$HOME/.var/app/io.github.softfever.OrcaSlicer/config/OrcaSlicer/user"; do
+for d in "$HOME/.config/OrcaSlicer/user" "$HOME/.var/app/com.orcaslicer.OrcaSlicer/config/OrcaSlicer/user" \\
+  "$HOME/.var/app/io.github.softfever.OrcaSlicer/config/OrcaSlicer/user"; do
   emit user "$d"
 done
 true

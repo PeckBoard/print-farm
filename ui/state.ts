@@ -77,6 +77,7 @@ export interface Diagnostics {
     orca_path: string;
     orca_found: boolean;
     orca_resolved: string | null;
+    orca_via: "path" | "local" | "flatpak" | null;
     display: boolean;
     xvfb_run: string | null;
     headless_mode: string;

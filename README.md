@@ -40,7 +40,7 @@ npm run typecheck # plugin + ui/
 | ------------------- | ------------------------------- | --------------------------------------------------------------------- |
 | `bridge_url`        | `http://127.0.0.1:7781`         | print-bridge sidecar                                                  |
 | `bridge_token`      | —                               | secret; sent as `Authorization: Bearer`                               |
-| `orca_path`         | `orca-slicer`                   | name on PATH or absolute path (AppImage ok)                           |
+| `orca_path`         | `orca-slicer`                   | name on PATH or absolute path (AppImage ok); the default also falls back to `~/.local/bin/orca-slicer`, then flatpak (see OrcaSlicer) |
 | `orca_profiles_dir` | auto-detect                     | `:`-separated vendor roots (`<root>/<Vendor>/{machine,filament,process}`) |
 | `orca_headless`     | `auto`                          | `auto` = wrap in `xvfb-run -a` when no `$DISPLAY`/`$WAYLAND_DISPLAY` and xvfb-run exists; `always`; `never` |
 | `storage_dir`       | `~/.local/share/peckboard-print-farm` | see [Storage](#storage)                                         |
@@ -142,7 +142,7 @@ type Print = {
 | `GET prints`                  | —                                                                                                        | `{prints: Print[]}`                                            |
 | `POST prints/:id/start`       | start a queued / agent-requested print                                                                    | `{print: Print}`                                               |
 | `POST prints/:id/dismiss`     | drop a queued print without starting it (file stays on the printer)                                      | `{print: Print}` (status `declined`)                           |
-| `GET diagnostics`             | —                                                                                                        | `{orca: {orca_path, orca_found, orca_resolved, display, xvfb_run, headless_mode, curl_found}, bridge_url, profile_roots}` |
+| `GET diagnostics`             | —                                                                                                        | `{orca: {orca_path, orca_found, orca_resolved, orca_via: "path"\|"local"\|"flatpak"\|null, display, xvfb_run, headless_mode, curl_found}, bridge_url, profile_roots}` |
 
 Upload flow: `POST uploads {name, data_base64: <first ≤1 MiB>}` → `file.id`,
 then `POST uploads/:id/chunk {offset: file.size, data_base64}` repeatedly, the
@@ -222,6 +222,15 @@ Command line (one detached job per slice, polled):
 
 - Plain targets produce `<out>/plate_1.gcode`; Bambu targets (printer type
   `bambu`, vendor `BBL`, or `printer_model` "Bambu Lab …") produce
+- Finding the binary: `orca_path` if it resolves (`command -v`). When it is
+  the default `orca-slicer` and not on PATH, Print Farm tries
+  `$HOME/.local/bin/orca-slicer` (App Manager's AppImage wrapper —
+  Peckboard's PATH often lacks `~/.local/bin`), then flatpak
+  (`com.orcaslicer.OrcaSlicer`, legacy `io.github.softfever.OrcaSlicer`,
+  checked with `flatpak info`), run as
+  `flatpak run --filesystem=<storage_dir> <id>` so the sandbox can read the
+  model and write the job dir. `GET diagnostics` reports which one
+  (`orca_resolved`, `orca_via`).
   `<out>/result.gcode.3mf`. `result.json` (Linux) supplies error text.
 - The three JSONs are the selected presets **flattened** along `inherits`
   (looked up by name in the chosen vendor, then the user presets, then

@@ -16,7 +16,7 @@
 
 import { storeGet, storePut, storeList } from "./host";
 import { nextSeq } from "./counter";
-import { orcaPath, orcaHeadless } from "./config";
+import { orcaPath, orcaHeadless, DEFAULT_ORCA_PATH } from "./config";
 import { sh, storageDir, requireFile, newFileRecord, putFile, headTail, FileRecord, writeText } from "./storage";
 import { parseGcodeEstimate, GcodeEstimate } from "./gcode";
 import { resolveProfile, isBambuMachine } from "./profiles";
@@ -43,7 +43,8 @@ export interface SliceJob {
 // ── pure ────────────────────────────────────────────────────────────────────
 
 export interface OrcaArgsInput {
-  orca: string;
+  /// The program — a single path, or an argv prefix (`flatpak run … <id>`).
+  orca: string | string[];
   modelPath: string;
   jobDir: string;
   target: SliceTarget;
@@ -55,7 +56,7 @@ export const RESULT_3MF = "result.gcode.3mf";
 
 /// The OrcaSlicer CLI argv (program first). Pure — tested.
 export function buildOrcaArgs(i: OrcaArgsInput): string[] {
-  const a = [i.orca, "--arrange", i.arrange === false ? "0" : "1"];
+  const a = [...(Array.isArray(i.orca) ? i.orca : [i.orca]), "--arrange", i.arrange === false ? "0" : "1"];
   if (i.orient) a.push("--orient", "1");
   a.push(
     "--slice", "0",
@@ -68,6 +69,63 @@ export function buildOrcaArgs(i: OrcaArgsInput): string[] {
   return a;
 }
 
+/// Flatpak app ids OrcaSlicer has shipped under (current first).
+export const ORCA_FLATPAK_IDS = ["com.orcaslicer.OrcaSlicer", "io.github.softfever.OrcaSlicer"];
+
+export interface OrcaResolution {
+  /// argv prefix that launches OrcaSlicer.
+  argv: string[];
+  /// What was found, for diagnostics (a path, or `flatpak run <id>`).
+  resolved: string;
+  via: "path" | "local" | "flatpak";
+}
+
+/// Pick how to launch OrcaSlicer from the probe's findings. Pure — tested.
+/// The configured command wins when it resolves; only the default
+/// `orca-slicer` falls back to ~/.local/bin (App Manager's AppImage wrapper,
+/// often missing from Peckboard's PATH), then flatpak. The flatpak sandbox
+/// gets the storage dir (models + job dirs) mounted read-write.
+export function resolveOrca(setting: string, probe: Record<string, string>, storage: string): OrcaResolution | null {
+  if (probe.path) return { argv: [setting], resolved: probe.path, via: "path" };
+  if (setting !== DEFAULT_ORCA_PATH) return null;
+  if (probe.local) return { argv: [probe.local], resolved: probe.local, via: "local" };
+  if (probe.flatpak) {
+    return { argv: ["flatpak", "run", `--filesystem=${storage}`, probe.flatpak], resolved: `flatpak run ${probe.flatpak}`, via: "flatpak" };
+  }
+  return null;
+}
+
+/// Parse `key=value` lines. Pure.
+export function parseKv(out: string): Record<string, string> {
+  const kv: Record<string, string> = {};
+  for (const line of out.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0) kv[line.slice(0, i)] = line.slice(i + 1).trim();
+  }
+  return kv;
+}
+
+// $1 = configured command, $2 = 1 to probe the default's fallbacks.
+const ORCA_PROBE = [
+  'o=$1; p=$(command -v "$o" 2>/dev/null); echo "path=$p"',
+  'if [ -z "$p" ] && [ "$2" = 1 ]; then',
+  '  l="$HOME/.local/bin/orca-slicer"; [ -x "$l" ] && echo "local=$l"',
+  `  if command -v flatpak >/dev/null 2>&1; then for id in ${ORCA_FLATPAK_IDS.join(" ")}; do`,
+  '    flatpak info "$id" >/dev/null 2>&1 && { echo "flatpak=$id"; break; }',
+  '  done; fi',
+  'fi',
+].join("\n");
+
+function probeArgs(): string[] {
+  const o = orcaPath();
+  return [o, o === DEFAULT_ORCA_PATH ? "1" : "0"];
+}
+
+/// How to launch OrcaSlicer on this host, or null when it isn't installed.
+export function findOrca(): OrcaResolution | null {
+  return resolveOrca(orcaPath(), parseKv(sh(ORCA_PROBE + "\ntrue", probeArgs(), 30)), storageDir());
+
+}
 export interface PollResult {
   exited: boolean;
   exitCode: number | null;
@@ -211,7 +269,7 @@ export function startSlice(req: SliceRequest): SliceJob {
 
   const command = [
     ...headlessPrefix(),
-    ...buildOrcaArgs({ orca: orcaPath(), modelPath: model.path, jobDir: dir, target, arrange: req.arrange, orient: req.orient }),
+    ...buildOrcaArgs({ orca: findOrca()?.argv ?? orcaPath(), modelPath: model.path, jobDir: dir, target, arrange: req.arrange, orient: req.orient }),
   ];
   const pid = Number(sh(LAUNCH, [dir, ...command], 30).trim());
   const job: SliceJob = {
@@ -286,21 +344,19 @@ function estimateFor(f: FileRecord, outDir: string): GcodeEstimate | undefined {
 /// Diagnostics for the UI: is the CLI reachable, does it need xvfb?
 export function orcaDiagnostics(): Record<string, unknown> {
   const out = sh(
-    'o=$1; p=$(command -v "$o" 2>/dev/null); echo "path=$p"; ' +
-      'echo "display=${DISPLAY:-}${WAYLAND_DISPLAY:-}"; echo "xvfb=$(command -v xvfb-run 2>/dev/null)"; ' +
+    ORCA_PROBE +
+      '\necho "display=${DISPLAY:-}${WAYLAND_DISPLAY:-}"; echo "xvfb=$(command -v xvfb-run 2>/dev/null)"; ' +
       'echo "curl=$(command -v curl 2>/dev/null)"; true',
-    [orcaPath()],
-    15,
+    probeArgs(),
+    30,
   );
-  const kv: Record<string, string> = {};
-  for (const line of out.split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0) kv[line.slice(0, i)] = line.slice(i + 1).trim();
-  }
+  const kv = parseKv(out);
+  const orca = resolveOrca(orcaPath(), kv, storageDir());
   return {
     orca_path: orcaPath(),
-    orca_found: !!kv.path,
-    orca_resolved: kv.path || null,
+    orca_found: !!orca,
+    orca_resolved: orca?.resolved ?? null,
+    orca_via: orca?.via ?? null,
     display: !!kv.display,
     xvfb_run: kv.xvfb || null,
     headless_mode: orcaHeadless(),

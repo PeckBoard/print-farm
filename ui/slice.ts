@@ -126,10 +126,10 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
             h("b", { text: "OrcaSlicer isn't installed — slicing is unavailable" }),
             h("p", {
               text:
-                `“${d.orca.orca_path}” wasn't found on this host. Install OrcaSlicer (the AppImage works), or point the “OrcaSlicer executable” plugin setting at it. ` +
+                `“${d.orca.orca_path}” wasn't found on this host (also checked ~/.local/bin and flatpak). Install OrcaSlicer (the AppImage works), or point the “OrcaSlicer executable” plugin setting at it. ` +
                 "You can still upload G-code and send it to printers.",
             }),
-            h("div", { class: "row" }, am("install=orca-slicer&from=print-farm")),
+            h("div", { class: "row" }, am("install=orca-slicer,xvfb&from=print-farm")),
           ),
         ),
       );
