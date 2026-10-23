@@ -39,7 +39,7 @@ npm run typecheck # plugin + ui/
 | Key                 | Default                         | Notes                                                                 |
 | ------------------- | ------------------------------- | --------------------------------------------------------------------- |
 | `bridge_url`        | `http://127.0.0.1:7781`         | print-bridge sidecar                                                  |
-| `bridge_token`      | —                               | secret; sent as `Authorization: Bearer`                               |
+| `bridge_token`      | `~/.config/print-bridge/token`  | secret; sent as `Authorization: Bearer`. Empty = read `${XDG_CONFIG_HOME:-~/.config}/print-bridge/token` (written by App Manager's print-bridge install); never logged or sent to the UI |
 | `orca_path`         | `orca-slicer`                   | name on PATH or absolute path (AppImage ok); the default also falls back to `~/.local/bin/orca-slicer`, then flatpak (see OrcaSlicer) |
 | `orca_profiles_dir` | auto-detect                     | `:`-separated vendor roots (`<root>/<Vendor>/{machine,filament,process}`) |
 | `orca_headless`     | `auto`                          | `auto` = wrap in `xvfb-run -a` when no `$DISPLAY`/`$WAYLAND_DISPLAY` and xvfb-run exists; `always`; `never` |
@@ -142,7 +142,7 @@ type Print = {
 | `GET prints`                  | —                                                                                                        | `{prints: Print[]}`                                            |
 | `POST prints/:id/start`       | start a queued / agent-requested print                                                                    | `{print: Print}`                                               |
 | `POST prints/:id/dismiss`     | drop a queued print without starting it (file stays on the printer)                                      | `{print: Print}` (status `declined`)                           |
-| `GET diagnostics`             | —                                                                                                        | `{orca: {orca_path, orca_found, orca_resolved, orca_via: "path"\|"local"\|"flatpak"\|null, display, xvfb_run, headless_mode, curl_found}, bridge_url, profile_roots}` |
+| `GET diagnostics` (`?bridge=1`) | —                                                                                                      | `{orca: {orca_path, orca_found, orca_resolved, orca_via: "path"\|"local"\|"flatpak"\|null, display, xvfb_run, headless_mode, curl_found}, bridge_url, bridge: {reachable, version?, token_source: "setting"\|"file"\|"none", error?} \| null, profile_roots}` — `bridge` probes `GET {bridge_url}/health` only when a Bambu printer exists or `?bridge=1`, else `null` |
 
 Upload flow: `POST uploads {name, data_base64: <first ≤1 MiB>}` → `file.id`,
 then `POST uploads/:id/chunk {offset: file.size, data_base64}` repeatedly, the
@@ -163,7 +163,20 @@ last with `done: true`. Retry a failed chunk with the `size` the error reports.
   start after a confirm). `GET diagnostics` problems show as a banner with an
   App Manager link.
 - **Printers**: add / edit / remove / test connection, per-type fields,
-  saved-secret state, default Orca profiles.
+  saved-secret state, default Orca profiles. Choosing type Bambu (and any Bambu
+  row while the bridge is down) shows the print-bridge status: "Bridge
+  connected vX", or "Bambu printers need the print-bridge helper" with the
+  error (a wrong token says so) and an **Install print-bridge** button deep-
+  linking App Manager (`?install=print-bridge&from=print-farm`).
+
+### print-bridge Setup
+
+App Manager's `print-bridge` entry installs `~/.local/bin/print-bridge`,
+writes a token to `~/.config/print-bridge/token`, and runs it as a systemd
+user service on `127.0.0.1:7781` — the defaults here, so no settings are
+needed. Print Farm reads that token file when `bridge_token` is empty
+(re-read every ~30s, so a reinstall's new token is picked up). The printer
+must be in LAN Only Mode (plus Developer Mode on recent firmware).
 
 Manual check against a fake printer: `node test/fixtures/fake-moonraker.js
 <port>` (serves a mid-print Moonraker + a JPEG webcam), `node

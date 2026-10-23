@@ -14,7 +14,7 @@ import { htmlResponse, jsonResponse, errMsg } from "./verdict";
 import { PAGE } from "./page";
 import { listPrinters, getPrinter, savePrinter, deletePrinter, redact } from "./printers";
 import { driverFor } from "./drivers";
-import { registerWithBridge, unregisterFromBridge } from "./drivers/bambu";
+import { registerWithBridge, unregisterFromBridge, bridgeDiagnostics } from "./drivers/bambu";
 import { defaultTransport } from "./transport";
 import { bridgeConfig } from "./config";
 import { PrinterRecord } from "./drivers/types";
@@ -228,7 +228,19 @@ export const ROUTES: Array<[string, Handler]> = [
       return { print: publicJob(dismissPrint(job)) };
     },
   ],
-  ["GET diagnostics", () => ({ orca: orcaDiagnostics(), bridge_url: bridgeConfig().url, profile_roots: detectRoots() })],
+  [
+    "GET diagnostics",
+    ({ query }) => {
+      const cfg = bridgeConfig();
+      const hasBambu = listPrinters().some((p) => p.type === "bambu");
+      return {
+        orca: orcaDiagnostics(),
+        bridge_url: cfg.url,
+        bridge: bridgeDiagnostics(hasBambu, queryParam(query, "bridge") === "1", defaultTransport, cfg),
+        profile_roots: detectRoots(),
+      };
+    },
+  ],
 ];
 
 /// Match "METHOD pattern" against a request (path relative to API). Pure.

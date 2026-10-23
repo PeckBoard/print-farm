@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { bambuDriver, coerceStatus } from "../src/drivers/bambu";
+import { bambuDriver, coerceStatus, bridgeDiagnostics } from "../src/drivers/bambu";
+import { resolveBridgeToken } from "../src/config";
 import { FakeTransport, json } from "./fakeTransport";
 import { PrinterRecord } from "../src/drivers/types";
 
@@ -68,4 +69,50 @@ describe("bambu via print-bridge", () => {
     const t = new FakeTransport([["GET /health", new Error("connection refused")]]);
     expect(bambuDriver(P, t, BRIDGE).test()).toMatchObject({ ok: false, detail: expect.stringMatching(/unreachable/) });
   });
+
+describe("print-bridge token resolution", () => {
+  it("prefers the explicit setting and never reads the file then", () => {
+    let read = 0;
+    expect(resolveBridgeToken(" set ", () => (read++, "file"))).toEqual({ token: "set", source: "setting" });
+    expect(read).toBe(0);
+  });
+
+  it("falls back to the trimmed token file, else none", () => {
+    expect(resolveBridgeToken("", () => "abc123\n")).toEqual({ token: "abc123", source: "file" });
+    expect(resolveBridgeToken("", () => "")).toEqual({ token: "", source: "none" });
+    expect(resolveBridgeToken("", () => { throw new Error("exec denied"); })).toEqual({ token: "", source: "none" });
+  });
+});
+
+describe("diagnostics bridge section", () => {
+  const cfg = { ...BRIDGE, token_source: "file" as const };
+
+  it("is not probed without a Bambu printer unless asked", () => {
+    const t = new FakeTransport([]);
+    expect(bridgeDiagnostics(false, false, t, cfg)).toBeNull();
+    expect(t.calls).toHaveLength(0);
+  });
+
+  it("reports reachable with the version, without echoing the token", () => {
+    const t = new FakeTransport([["GET /health", json({ ok: true, version: "0.2.0" })]]);
+    const d = bridgeDiagnostics(true, false, t, cfg);
+    expect(d).toEqual({ reachable: true, version: "0.2.0", token_source: "file" });
+    expect(JSON.stringify(d)).not.toContain("tok\"");
+    expect(t.calls[0].headers).toMatchObject({ Authorization: "Bearer tok" });
+  });
+
+  it("says the token was rejected on 401", () => {
+    const t = new FakeTransport([["GET /health", json({ error: "unauthorized" }, 401)]]);
+    expect(bridgeDiagnostics(false, true, t, cfg)).toMatchObject({ reachable: false, token_source: "file", error: expect.stringMatching(/rejected the token/) });
+  });
+
+  it("reports an unreachable bridge", () => {
+    const t = new FakeTransport([["GET /health", new Error("connection refused")]]);
+    expect(bridgeDiagnostics(false, true, t, { ...BRIDGE, token: "", token_source: "none" })).toMatchObject({
+      reachable: false,
+      token_source: "none",
+      error: expect.stringMatching(/isn't reachable at http:\/\/127\.0\.0\.1:7781/),
+    });
+  });
+});
 });

@@ -2,7 +2,7 @@
 // form (type-specific fields, saved-secret state, Orca default profiles).
 
 import { h, clear, icon, btn, toast, errText, confirmDialog, openModal, field, select } from "./dom";
-import { get, post, put, del } from "./api";
+import { get, post, put, del, openPluginPage } from "./api";
 import { state, Printer, Diagnostics, loadPrinters } from "./state";
 import { TYPE_LABELS, TYPE_SHORT } from "./format";
 import { PrinterDraft, validatePrinter, printerBody } from "./validate";
@@ -16,6 +16,37 @@ const HOST_HINT: Record<string, string> = {
   bambu: "The printer's LAN IP address (printer screen → Settings → Network)",
 };
 const BAMBU_MODELS = ["", "X1C", "X1E", "X1", "P1S", "P1P", "A1", "A1 mini", "H2D"];
+
+const LAN_NOTE =
+  "Bambu printers must be in LAN Only Mode (and Developer Mode on recent firmware); copy the access code from the printer's network settings.";
+
+/// print-bridge status banner (null until the bridge has been probed).
+export function bridgeBanner(b: Diagnostics["bridge"] | undefined, recheck?: () => void): HTMLElement | null {
+  if (!b) return null;
+  if (b.reachable) {
+    const v = b.version ? " " + (b.version.startsWith("v") ? b.version : "v" + b.version) : "";
+    return h("div", { class: "banner ok", role: "status" }, icon("check"), h("div", { class: "grow" }, h("b", { text: "Bridge connected" + v }), h("p", { text: LAN_NOTE })));
+  }
+  const q = "install=print-bridge&from=print-farm";
+  const install = h("a", { class: "btn sm primary", href: "/plugin-page/app-manager/app-manager?" + q }, icon("ext"), "Install print-bridge");
+  install.addEventListener("click", (e) => {
+    e.preventDefault();
+    openPluginPage("app-manager", "app-manager", q);
+  });
+  return h(
+    "div",
+    { class: "banner warn", role: "status" },
+    icon("warn"),
+    h(
+      "div",
+      { class: "grow" },
+      h("b", { text: "Bambu printers need the print-bridge helper" }),
+      h("p", { text: b.error || "print-bridge isn't reachable." }),
+      h("p", { text: "App Manager installs it as a background service on 127.0.0.1:7781; Print Farm picks up its token automatically. " + LAN_NOTE }),
+      h("div", { class: "row" }, install, recheck ? btn("Check again", { cls: "sm", icon: "refresh", onClick: recheck }) : null),
+    ),
+  );
+}
 
 export interface PrintersView {
   el: HTMLElement;
@@ -56,6 +87,14 @@ export function printersView(onChanged: () => void): PrintersView {
     for (const p of state.printers) list.appendChild(row(p));
   }
 
+  async function loadDiagnostics(probeBridge = false): Promise<void> {
+    try {
+      state.diagnostics = await get<Diagnostics>(probeBridge ? "diagnostics?bridge=1" : "diagnostics");
+    } catch (_e) {
+      /* the bridge banner just stays hidden */
+    }
+  }
+
   function row(p: Printer): HTMLElement {
     const t = tests.get(p.id);
     const defaults = [p.orca_printer_profile, p.orca_filament_profile, p.orca_process_profile].filter(Boolean).join(" · ");
@@ -80,6 +119,9 @@ export function printersView(onChanged: () => void): PrintersView {
         btn("Remove", { cls: "sm danger", icon: "trash", aria: "Remove " + p.name, onClick: () => remove(p) }),
       ),
       t ? h("div", { class: "testres " + (t.ok === null ? "run" : t.ok ? "ok" : "bad"), role: "status", text: t.ok === null ? "Connecting…" : (t.ok ? "Connected — " : "Failed — ") + t.detail }) : null,
+      p.type === "bambu" && state.diagnostics?.bridge && !state.diagnostics.bridge.reachable
+        ? h("div", { class: "pbanner" }, bridgeBanner(state.diagnostics.bridge, () => loadDiagnostics().then(render)))
+        : null,
     );
   }
 
@@ -181,6 +223,9 @@ export function printersView(onChanged: () => void): PrintersView {
     fields.host = field("Address", hostIn, { forId: "pf-host" });
     fields.port = field("Port", portIn, { forId: "pf-port", hint: "Optional" });
     const typeHost = h("div", { class: "stack" });
+    // Above the fields: blur validation adds errors there, and a banner below
+    // them would shift mid-click (mousedown blurs, mouseup misses the button).
+    const bridgeHost = h("div");
     const tlsBox = h("input", { type: "checkbox", id: "pf-tls", checked: d.tls_insecure }) as HTMLInputElement;
     tlsBox.addEventListener("change", () => (d.tls_insecure = tlsBox.checked));
     const tlsRow = h("label", { class: "check", for: "pf-tls" }, tlsBox, "Accept a self-signed HTTPS certificate");
@@ -214,6 +259,7 @@ export function printersView(onChanged: () => void): PrintersView {
 
     function renderTypeFields() {
       clear(typeHost);
+      clear(bridgeHost);
       for (const k of ["api_key", "password", "access_code", "serial", "username", "storage", "model"]) delete fields[k];
       portIn.placeholder = DEFAULT_PORT[d.type] ? "Default " + DEFAULT_PORT[d.type] : "";
       // Bambu printers are reached through print-bridge by IP; no port.
@@ -250,22 +296,19 @@ export function printersView(onChanged: () => void): PrintersView {
         fields.serial = field("Serial number", serial, { forId: "pf-serial" });
         const model = select("pf-model", BAMBU_MODELS.map((x) => ({ value: x, label: x || "Not specified" })), d.model, (v) => (d.model = v));
         fields.model = field("Model", model, { forId: "pf-model", hint: "Optional" });
+        const slot = h("div");
+        const paint = () =>
+          slot.replaceChildren(
+            bridgeBanner(state.diagnostics?.bridge, check) ||
+              h("div", { class: "banner info", role: "status" }, icon("info"), h("div", { class: "grow" }, h("b", { text: "Checking print-bridge…" }), h("p", { text: LAN_NOTE }))),
+          );
+        const check = () => {
+          loadDiagnostics(true).then(paint);
+        };
+        paint();
+        check();
+        bridgeHost.append(slot);
         typeHost.append(
-          h(
-            "div",
-            { class: "banner info" },
-            icon("info"),
-            h(
-              "div",
-              { class: "grow" },
-              h("b", { text: "Bambu printers connect through print-bridge" }),
-              h("p", {
-                text:
-                  "Turn on LAN Only Mode (and Developer Mode on recent firmware) on the printer, then copy the access code from its network settings. " +
-                  "The local print-bridge sidecar (" + (state.diagnostics?.bridge_url || "see plugin settings") + ") handles MQTT, FTPS and the camera.",
-              }),
-            ),
-          ),
           h("div", { class: "grid2" }, fields.serial.el, fields.model.el),
           secretInput("access_code", "pf-code", "Access code", !!saved?.bambu?.has_access_code, "8 characters, shown on the printer's network screen."),
         );
@@ -334,6 +377,7 @@ export function printersView(onChanged: () => void): PrintersView {
     const form = h(
       "form",
       { class: "stack", novalidate: true },
+      bridgeHost,
       h("div", { class: "grid2" }, fields.name.el, fields.type.el),
       h("div", { class: "grid3" }, fields.host.el, fields.port.el),
       typeHost,
@@ -366,8 +410,8 @@ export function printersView(onChanged: () => void): PrintersView {
     show() {
       render();
       refresh();
-      // The Bambu note names the print-bridge URL.
-      if (!state.diagnostics) get<Diagnostics>("diagnostics").then((d) => (state.diagnostics = d)).catch(() => {});
+      // Re-probe each visit: the bridge may have been installed meanwhile.
+      loadDiagnostics().then(render);
     },
     openAdd() {
       openForm(null);

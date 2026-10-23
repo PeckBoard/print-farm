@@ -101,7 +101,7 @@ export function bambuDriver(p: PrinterRecord, t: Transport, bridge: BridgeConfig
     test() {
       try {
         const h = t.request({ method: "GET", url: bridge.url.replace(/\/+$/, "") + "/health", headers: auth, timeoutSecs: 5 });
-        if (h.status === 401 || h.status === 403) return { ok: false, detail: "print-bridge rejected the token (bridge_token setting)" };
+        if (h.status === 401 || h.status === 403) return { ok: false, detail: TOKEN_REJECTED };
         const health = jsonBody(expectOk(h, "bridge /health"), "bridge health");
         registerWithBridge(p, t, bridge);
         const st = this.status();
@@ -114,6 +114,51 @@ export function bambuDriver(p: PrinterRecord, t: Transport, bridge: BridgeConfig
       }
     },
   };
+}
+
+const TOKEN_REJECTED = "print-bridge rejected the token — check ~/.config/print-bridge/token or the bridge_token setting";
+
+export interface BridgeHealth {
+  reachable: boolean;
+  version?: string;
+  token_source: "setting" | "file" | "none";
+  error?: string;
+}
+
+/// Probe `GET {url}/health` for diagnostics. Never throws; never echoes the token.
+export function bridgeHealth(t: Transport, bridge: BridgeConfig, tokenSource: BridgeHealth["token_source"]): BridgeHealth {
+  const out: BridgeHealth = { reachable: false, token_source: tokenSource };
+  try {
+    const h = t.request({
+      method: "GET",
+      url: bridge.url.replace(/\/+$/, "") + "/health",
+      headers: bridge.token ? { Authorization: `Bearer ${bridge.token}` } : {},
+      timeoutSecs: 3,
+    });
+    if (h.status === 401 || h.status === 403) {
+      // It answered, so it's running — but every call will fail.
+      out.error = tokenSource === "none" ? "print-bridge requires a token, and none was found (~/.config/print-bridge/token)" : TOKEN_REJECTED;
+      return out;
+    }
+    const body = jsonBody(expectOk(h, "bridge /health"), "bridge health");
+    out.reachable = true;
+    if (typeof body?.version === "string" && body.version) out.version = body.version;
+  } catch (e) {
+    // Connection refused etc.: the transport's text is noise in a banner.
+    const msg = (e as Error).message;
+    out.error = /HTTP \d{3}|expected JSON/.test(msg) ? `print-bridge at ${bridge.url}: ${msg}` : `print-bridge isn't reachable at ${bridge.url} — is it installed and running?`;
+  }
+  return out;
+}
+/// The diagnostics `bridge` section: probed only when a Bambu printer exists
+/// or the caller asked (`?bridge=1`), so non-Bambu farms see no noise.
+export function bridgeDiagnostics(
+  hasBambu: boolean,
+  asked: boolean,
+  t: Transport,
+  bridge: BridgeConfig & { token_source: BridgeHealth["token_source"] },
+): BridgeHealth | null {
+  return hasBambu || asked ? bridgeHealth(t, bridge, bridge.token_source) : null;
 }
 
 /// Push (or refresh) a Bambu printer's connection details to the sidecar.

@@ -1,6 +1,6 @@
 {
   "name": "peckboard-print-farm-plugin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Peckboard WASM plugin — 3D printer farm control (Moonraker, OctoPrint, PrusaLink, Bambu via print-bridge) plus OrcaSlicer CLI slicing",
   "scripts": {

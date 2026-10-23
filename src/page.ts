@@ -139,6 +139,8 @@ const CSS = `
   .banner.bad > svg { color: var(--danger); }
   .banner.info { background: var(--info-bg); border-color: var(--info-border); }
   .banner.info > svg { color: var(--info); }
+  .banner.ok { background: var(--success-bg); border-color: var(--success-border); }
+  .banner.ok > svg { color: var(--success); }
 
   /* ── queue ── */
   .queue { display: grid; gap: 8px; margin-bottom: 20px; }
@@ -193,6 +195,8 @@ const CSS = `
   .prow .sub { color: var(--text2); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; min-width: 0; }
   .prow .sub span { overflow-wrap: anywhere; }
   .prow .acts { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .prow .pbanner { grid-column: 1 / -1; }
+  .prow .pbanner .banner { margin-bottom: 0; }
   .testres { grid-column: 1 / -1; font-size: 12px; border-radius: 6px; padding: 5px 9px; border: 1px solid; overflow-wrap: anywhere; }
   .testres.ok { color: var(--success); background: var(--success-bg); border-color: var(--success-border); }
   .testres.bad { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }

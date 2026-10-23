@@ -84,6 +84,8 @@ export interface Diagnostics {
     curl_found: boolean;
   };
   bridge_url: string;
+  /// null when not probed (no Bambu printer and `?bridge=1` not asked).
+  bridge: { reachable: boolean; version?: string; token_source: "setting" | "file" | "none"; error?: string } | null;
   profile_roots: { kind: string; path: string }[];
 }
 

@@ -205,7 +205,7 @@ export function manifestJson(): string {
         title: "print-bridge token",
         type: "string",
         secret: true,
-        description: "Bearer token the print-bridge sidecar expects.",
+        description: "Bearer token the print-bridge sidecar expects. Leave empty to use ~/.config/print-bridge/token (written by App Manager's print-bridge install).",
       },
       {
         key: "orca_path",
