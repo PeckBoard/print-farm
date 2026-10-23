@@ -12,7 +12,7 @@
 
 import { htmlResponse, jsonResponse, errMsg } from "./verdict";
 import { PAGE } from "./page";
-import { listPrinters, getPrinter, savePrinter, deletePrinter, redact } from "./printers";
+import { listPrinters, getPrinter, savePrinter, deletePrinter, redact, putPrinter } from "./printers";
 import { driverFor } from "./drivers";
 import { registerWithBridge, unregisterFromBridge, bridgeDiagnostics } from "./drivers/bambu";
 import { defaultTransport } from "./transport";
@@ -31,6 +31,8 @@ import {
 import { detectRoots, listVendors, scanProfiles, parseKind } from "./profiles";
 import { startSlice, pollSlice, listJobs, orcaDiagnostics } from "./slice";
 import { uploadForPrint, startPrint, dismissPrint, listPrints, getPrint, publicJob } from "./prints";
+import { autoFill } from "./autoprofiles";
+import { ensureSetup, invalidateSetup, syncSerials, SetupName } from "./setup";
 
 export const PAGE_PATH = "/plugin-api/v1/print-farm";
 export const API = "/api/plugin-ui/print-farm";
@@ -84,22 +86,49 @@ function syncBridge(p: PrinterRecord): string | null {
   }
 }
 
+/// Save, then fill in default slicing profiles when the printer has none.
+function saveWithDefaults(body: any, existing: PrinterRecord | null): PrinterRecord {
+  let p = savePrinter(body, existing);
+  const filled = autoFill(p, true);
+  if (filled) {
+    putPrinter(filled);
+    p = filled;
+  }
+  if (p.type === "bambu") invalidateSetup();
+  return p;
+}
+
+/// Printers for the UI, lazily auto-filling defaults on ones that lack them.
+function listWithDefaults(): PrinterRecord[] {
+  return listPrinters().map((p) => {
+    const filled = autoFill(p, false);
+    if (!filled) return p;
+    putPrinter(filled);
+    return filled;
+  });
+}
+
 type Handler = (ctx: { params: Record<string, string>; query: string; body: any }) => unknown;
+
+function setupName(v: string): SetupName {
+  if (v !== "orca" && v !== "bridge") throw new HttpError(404, `unknown setup '${v}'`);
+  return v;
+}
 
 /// Route table: "METHOD path" (with :params) → handler. Mirrors manifest ui_routes.
 export const ROUTES: Array<[string, Handler]> = [
-  ["GET printers", () => ({ printers: listPrinters().map(redact) })],
+  ["GET printers", () => ({ printers: listWithDefaults().map(redact) })],
   [
     "POST printers",
     ({ body }) => {
-      const p = savePrinter(body, null);
+      const p = saveWithDefaults(body, null);
       return { printer: redact(p), warning: syncBridge(p) };
     },
   ],
   [
     "PUT printers/:id",
     ({ params, body }) => {
-      const p = savePrinter(body, printerOr404(params.id));
+      const p = saveWithDefaults(body, printerOr404(params.id));
       return { printer: redact(p), warning: syncBridge(p) };
     },
   ],
@@ -118,7 +147,19 @@ export const ROUTES: Array<[string, Handler]> = [
       return { removed: p.id };
     },
   ],
-  ["POST printers/:id/test", ({ params }) => driver(printerOr404(params.id)).test()],
+  [
+    "POST printers/:id/test",
+    ({ params }) => {
+      const p = printerOr404(params.id);
+      const r = driver(p).test();
+      if (p.type !== "bambu") return r;
+      // The bridge reads the real serial off the printer while connecting.
+      const notices = syncSerials([p]);
+      return notices.length ? { ...r, detail: r.detail + " — " + notices.join("; "), serial_corrected: true } : r;
+    },
+  ],
+  ["GET setup", () => ensureSetup()],
+  ["POST setup/:name/retry", ({ params }) => ensureSetup(setupName(params.name))],
   [
     "GET status",
     () => ({

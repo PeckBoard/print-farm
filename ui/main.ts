@@ -6,6 +6,7 @@ import { state } from "./state";
 import { farmView } from "./farm";
 import { printersView } from "./printers";
 import { sliceView } from "./slice";
+import { setupWatch } from "./setup";
 
 type Tab = "farm" | "slice" | "printers";
 
@@ -53,7 +54,12 @@ const farm = farmView(
     renderSummary();
   },
 );
-const printers = printersView(() => renderSummary());
+// Setup runs by itself: page load checks (and starts) any install needed.
+const setup = setupWatch();
+const printers = printersView(() => {
+  renderSummary();
+  setup.check();
+});
 const slice = sliceView(
   () => {
     go("printers");
@@ -67,7 +73,7 @@ const panels: Record<Tab, HTMLElement> = {
   slice: h("div", { role: "tabpanel", id: "panel-slice", "aria-labelledby": "tab-slice" }, slice.el),
   printers: h("div", { role: "tabpanel", id: "panel-printers", "aria-labelledby": "tab-printers" }, printers.el),
 };
-const main = h("main", null, panels.farm, panels.slice, panels.printers);
+const main = h("main", null, setup.el, panels.farm, panels.slice, panels.printers);
 app.append(header, main);
 
 let current: Tab | null = null;
@@ -109,3 +115,4 @@ setInterval(renderSummary, 2000);
 
 const initial = (location.hash.slice(1) || new URLSearchParams(location.search).get("tab") || "farm") as Tab;
 go(["farm", "slice", "printers"].indexOf(initial) >= 0 ? initial : "farm");
+setup.check();

@@ -21,6 +21,14 @@ import {
 } from "./prints";
 import { askUser, getAnswer } from "./host";
 import { PrinterRecord } from "./drivers/types";
+import { ensureSetupQuiet, SetupView } from "./setup";
+
+/// A one-line note for an agent while an automatic install runs/failed.
+function setupNote(what: string, v: SetupView | null | undefined): string | null {
+  if (!v || v.status === "ok") return null;
+  if (v.status === "running") return `${what} is being installed automatically (${v.phase ?? "starting"}); try again in a few minutes.`;
+  return `${what} could not be installed automatically: ${v.error ?? "unknown error"}. The user can press Retry on the Print Farm page.`;
+}
 
 function driver(p: PrinterRecord) {
   return driverFor(p, defaultTransport, bridgeConfig());
@@ -35,16 +43,19 @@ export function printerList(): unknown {
 }
 
 export function printerStatus(args: any): unknown {
+  const setup = ensureSetupQuiet();
+  const note = setupNote("print-bridge", setup?.bridge);
   if (s(args.printer)) {
     const p = resolvePrinter(args.printer);
-    return { id: p.id, name: p.name, status: driver(p).status() };
+    return { id: p.id, name: p.name, status: driver(p).status(), ...(note && p.type === "bambu" ? { setup: note } : {}) };
   }
-  return { printers: listPrinters().map((p) => ({ id: p.id, name: p.name, type: p.type, status: driver(p).status() })) };
+  return { printers: listPrinters().map((p) => ({ id: p.id, name: p.name, type: p.type, status: driver(p).status() })), ...(note ? { setup: note } : {}) };
 }
 
 export function profileList(args: any): unknown {
+  const note = setupNote("OrcaSlicer", ensureSetupQuiet()?.orca);
   const roots = detectRoots();
-  if (!roots.length) return { roots, vendors: [], hint: "no OrcaSlicer profiles found; set orca_profiles_dir" };
+  if (!roots.length) return { roots, vendors: [], hint: note ?? "no OrcaSlicer profiles found; set orca_profiles_dir" };
   if (!s(args.kind) || !s(args.vendor)) return { roots, vendors: listVendors(roots) };
   const kind = parseKind(args.kind);
   const q = s(args.query).toLowerCase();
@@ -54,6 +65,8 @@ export function profileList(args: any): unknown {
 }
 
 export function sliceModel(args: any): unknown {
+  const note = setupNote("OrcaSlicer", ensureSetupQuiet()?.orca);
+  if (note) throw new Error(note);
   let fileId = s(args.file_id);
   if (!fileId) {
     if (!s(args.path)) throw new Error("pass file_id (an uploaded file) or path (relative to the project folder)");

@@ -2,7 +2,7 @@
 // GET profiles. Used by the printer form (defaults) and the slice form.
 
 import { h, combobox, field, select, Combo } from "./dom";
-import { loadVendors, loadProfiles } from "./state";
+import { loadVendors, loadProfiles, SETUP_DONE } from "./state";
 
 export interface ProfileValues {
   vendor: string;
@@ -36,7 +36,8 @@ async function optionsFor(kind: "printer" | "filament" | "process", vendor: stri
 export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>, opts: { allowEmpty?: boolean; onChange?: () => void } = {}): ProfilePicker {
   let vendors: string[] = [];
   let unavailable: string | null = "Loading profiles…";
-  let vendor = initial.vendor || "";
+  // Bambu machine presets live under the BBL vendor (auto-picked defaults).
+  let vendor = initial.vendor || (/^Bambu Lab /.test(initial.printer || "") ? "BBL" : "");
   const vendorSel = select(idPrefix + "-vendor", [{ value: "", label: "Loading vendors…" }], "");
   vendorSel.disabled = true;
   const mk = (kind: "printer" | "filament" | "process", label: string) => {
@@ -74,35 +75,44 @@ export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>,
     opts.onChange?.();
   });
 
-  loadVendors()
-    .then((vs) => {
-      vendors = vs;
-      while (vendorSel.firstChild) vendorSel.removeChild(vendorSel.firstChild);
-      if (!vs.length) {
-        unavailable = "No OrcaSlicer profiles found on this host.";
-        vendorSel.appendChild(h("option", { value: "", text: "No profiles found" }));
-        for (const k of Object.keys(combos)) combos[k].c.setDisabled("No OrcaSlicer profiles found");
-        note.textContent = "Install OrcaSlicer (or set “OrcaSlicer profile directories” in the plugin settings) to pick profiles.";
+  const load = (force: boolean) =>
+    loadVendors(force)
+      .then((vs) => {
+        vendors = vs;
+        while (vendorSel.firstChild) vendorSel.removeChild(vendorSel.firstChild);
+        if (!vs.length) {
+          unavailable = "No OrcaSlicer profiles found on this host.";
+          vendorSel.appendChild(h("option", { value: "", text: "No profiles found" }));
+          for (const k of Object.keys(combos)) combos[k].c.setDisabled("No OrcaSlicer profiles found");
+          note.textContent = "Print Farm installs OrcaSlicer and its profiles automatically; they appear here as soon as that finishes.";
+          note.hidden = false;
+          opts.onChange?.();
+          return;
+        }
+        unavailable = null;
+        note.hidden = true;
+        for (const v of vs) vendorSel.appendChild(h("option", { value: v, text: v }));
+        if (!vendor || vs.indexOf(vendor) < 0) vendor = vs[0];
+        vendorSel.value = vendor;
+        vendorSel.disabled = false;
+        refill();
+        opts.onChange?.();
+      })
+      .catch((e) => {
+        unavailable = "Couldn't load profiles: " + (e as Error).message;
+        vendorSel.replaceChildren(h("option", { value: "", text: "Unavailable" }));
+        for (const k of Object.keys(combos)) combos[k].c.setDisabled("Profiles unavailable");
+        note.textContent = unavailable;
         note.hidden = false;
         opts.onChange?.();
-        return;
-      }
-      unavailable = null;
-      for (const v of vs) vendorSel.appendChild(h("option", { value: v, text: v }));
-      if (!vendor || vs.indexOf(vendor) < 0) vendor = vs[0];
-      vendorSel.value = vendor;
-      vendorSel.disabled = false;
-      refill();
-      opts.onChange?.();
-    })
-    .catch((e) => {
-      unavailable = "Couldn't load profiles: " + (e as Error).message;
-      vendorSel.replaceChildren(h("option", { value: "", text: "Unavailable" }));
-      for (const k of Object.keys(combos)) combos[k].c.setDisabled("Profiles unavailable");
-      note.textContent = unavailable;
-      note.hidden = false;
-      opts.onChange?.();
-    });
+      });
+  load(false);
+  // OrcaSlicer just finished installing: fill an empty picker in place.
+  const onSetupDone = () => {
+    if (!el.isConnected) window.removeEventListener(SETUP_DONE, onSetupDone);
+    else if (!vendors.length) load(true);
+  };
+  window.addEventListener(SETUP_DONE, onSetupDone);
 
   const el = h(
     "div",

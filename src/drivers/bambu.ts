@@ -132,6 +132,8 @@ export interface BridgeHealth {
   version?: string;
   token_source: "setting" | "file" | "none";
   error?: string;
+  /// It answered but refused the token (so it IS installed and running).
+  auth_failed?: boolean;
 }
 
 /// Probe `GET {url}/health` for diagnostics. Never throws; never echoes the token.
@@ -146,6 +148,7 @@ export function bridgeHealth(t: Transport, bridge: BridgeConfig, tokenSource: Br
     });
     if (h.status === 401 || h.status === 403) {
       // It answered, so it's running — but every call will fail.
+      out.auth_failed = true;
       out.error = tokenSource === "none" ? "print-bridge requires a token, and none was found (~/.config/print-bridge/token)" : TOKEN_REJECTED;
       return out;
     }
@@ -194,4 +197,30 @@ export function unregisterFromBridge(id: string, t: Transport, bridge: BridgeCon
     headers: bridge.token ? { Authorization: `Bearer ${bridge.token}` } : {},
     timeoutSecs: 10,
   });
+}
+
+/// `GET /printers` on the bridge: its registry, with `detected_serial` (bridge
+/// >= 0.1.3) when the printer's certificate names a different serial.
+export function fetchBridgePrinters(t: Transport, bridge: BridgeConfig): any {
+  const r = t.request({
+    method: "GET",
+    url: bridge.url.replace(/\/+$/, "") + "/printers",
+    headers: bridge.token ? { Authorization: `Bearer ${bridge.token}` } : {},
+    timeoutSecs: 5,
+  });
+  return jsonBody(expectOk(r, "bridge printers"), "bridge printers");
+}
+
+/// Serial corrections the bridge reports: entries whose `detected_serial`
+/// differs from the serial we stored for that (Bambu) printer. Pure — tested.
+export function serialFixes(stored: PrinterRecord[], bridgeBody: any): { id: string; from: string; to: string }[] {
+  const list: any[] = Array.isArray(bridgeBody) ? bridgeBody : Array.isArray(bridgeBody?.printers) ? bridgeBody.printers : [];
+  const out: { id: string; from: string; to: string }[] = [];
+  for (const e of list) {
+    const det = typeof e?.detected_serial === "string" ? e.detected_serial.trim() : "";
+    if (!/^[A-Za-z0-9]{8,32}$/.test(det)) continue;
+    const p = stored.find((x) => x.id === e?.id && x.type === "bambu" && x.bambu);
+    if (p && p.bambu!.serial !== det) out.push({ id: p.id, from: p.bambu!.serial, to: det });
+  }
+  return out;
 }

@@ -65,7 +65,9 @@ export interface PrinterRecord {
   api_key?: string;
   username?: string;
   password?: string;
-  bambu?: { serial: string; access_code: string; model?: string };
+  /// `serial_corrected_from`: the serial the user typed, when print-bridge
+  /// read a different one off the printer's certificate and we switched.
+  bambu?: { serial: string; access_code: string; model?: string; serial_corrected_from?: string };
   /// Accept a self-signed TLS certificate (https hosts only).
   tls_insecure?: boolean;
   /// PrusaLink storage name ("usb" on MK4/XL/MINI, "local" on some builds).

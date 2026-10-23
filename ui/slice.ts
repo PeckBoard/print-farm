@@ -4,7 +4,7 @@
 
 import { h, clear, icon, btn, toast, errText, confirmDialog, select, field } from "./dom";
 import { get, post, del, bytesToB64, b64ToBytes, openPluginPage } from "./api";
-import { state, FileRec, SliceJob, Print, Printer, Diagnostics, Status, printerById, loadPrinters } from "./state";
+import { state, FileRec, SliceJob, Print, Printer, Diagnostics, Status, printerById, loadPrinters, SETUP_DONE, SETUP_CHANGED } from "./state";
 import { fmtBytes, fmtDuration, fmtFilament, accepts, previewKind, TYPE_SHORT } from "./format";
 import { parseGcode, ParsedGcode } from "./gcode";
 import { Viewer, ViewerTheme, webglAvailable } from "./viewer";
@@ -106,6 +106,9 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     clear(banner);
     const d = state.diagnostics;
     if (!d) return;
+    // An automatic install is running or failed: the page-wide setup banner
+    // already says so (and the slicer arrives without a click).
+    if (state.setup && state.setup.orca.status !== "ok") return;
     const am = (q: string) => {
       const a = h("a", { class: "btn sm", href: "/plugin-page/app-manager/app-manager?" + q }, icon("ext"), "Open App Manager");
       a.addEventListener("click", (e) => {
@@ -165,6 +168,10 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       );
     }
   }
+  window.addEventListener(SETUP_CHANGED, () => renderBanner());
+  window.addEventListener(SETUP_DONE, () => {
+    loadDiagnostics().then(() => renderActions());
+  });
 
   // ── files ────────────────────────────────────────────────────────────
   async function loadFiles() {

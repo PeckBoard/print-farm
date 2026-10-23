@@ -2,8 +2,8 @@
 // form (type-specific fields, saved-secret state, Orca default profiles).
 
 import { h, clear, icon, btn, toast, errText, confirmDialog, openModal, field, select } from "./dom";
-import { get, post, put, del, openPluginPage } from "./api";
-import { state, Printer, Diagnostics, loadPrinters } from "./state";
+import { get, post, put, del } from "./api";
+import { state, Printer, Diagnostics, loadPrinters, SETUP_DONE } from "./state";
 import { TYPE_LABELS, TYPE_SHORT } from "./format";
 import { PrinterDraft, validatePrinter, printerBody } from "./validate";
 import { profilePicker } from "./profilePicker";
@@ -20,19 +20,29 @@ const BAMBU_MODELS = ["", "X1C", "X1E", "X1", "P1S", "P1P", "A1", "A1 mini", "H2
 const LAN_NOTE =
   "Bambu printers must be in LAN Only Mode (and Developer Mode on recent firmware); copy the access code from the printer's network settings.";
 
-/// print-bridge status banner (null until the bridge has been probed).
-export function bridgeBanner(b: Diagnostics["bridge"] | undefined, recheck?: () => void): HTMLElement | null {
+/// print-bridge status banner (null until the bridge has been probed). The
+/// bridge installs itself (see setup.ts) — this only reports. `adding` = the
+/// add-printer form, before any Bambu printer exists to trigger the install.
+export function bridgeBanner(b: Diagnostics["bridge"] | undefined, recheck?: () => void, adding = false): HTMLElement | null {
   if (!b) return null;
   if (b.reachable) {
     const v = b.version ? " " + (b.version.startsWith("v") ? b.version : "v" + b.version) : "";
     return h("div", { class: "banner ok", role: "status" }, icon("check"), h("div", { class: "grow" }, h("b", { text: "Bridge connected" + v }), h("p", { text: LAN_NOTE })));
   }
-  const q = "install=print-bridge&from=print-farm";
-  const install = h("a", { class: "btn sm primary", href: "/plugin-page/app-manager/app-manager?" + q }, icon("ext"), "Install print-bridge");
-  install.addEventListener("click", (e) => {
-    e.preventDefault();
-    openPluginPage("app-manager", "app-manager", q);
-  });
+  const setup = state.setup?.bridge;
+  if (setup?.status === "running" || (adding && !b.auth_failed)) {
+    return h(
+      "div",
+      { class: "banner info", role: "status" },
+      icon("info"),
+      h(
+        "div",
+        { class: "grow" },
+        h("b", { text: setup?.status === "running" ? "Setting up print-bridge…" : "print-bridge is set up automatically" }),
+        h("p", { text: "Bambu printers are reached through the print-bridge helper; Print Farm installs and starts it for you as soon as a Bambu printer is added. " + LAN_NOTE }),
+      ),
+    );
+  }
   return h(
     "div",
     { class: "banner warn", role: "status" },
@@ -40,10 +50,10 @@ export function bridgeBanner(b: Diagnostics["bridge"] | undefined, recheck?: () 
     h(
       "div",
       { class: "grow" },
-      h("b", { text: "Bambu printers need the print-bridge helper" }),
+      h("b", { text: "print-bridge isn't answering" }),
       h("p", { text: b.error || "print-bridge isn't reachable." }),
-      h("p", { text: "App Manager installs it as a background service on 127.0.0.1:7781; Print Farm picks up its token automatically. " + LAN_NOTE }),
-      h("div", { class: "row" }, install, recheck ? btn("Check again", { cls: "sm", icon: "refresh", onClick: recheck }) : null),
+      h("p", { text: LAN_NOTE }),
+      recheck ? h("div", { class: "row" }, btn("Check again", { cls: "sm", icon: "refresh", onClick: recheck })) : null,
     ),
   );
 }
@@ -108,8 +118,13 @@ export function printersView(onChanged: () => void): PrintersView {
         "div",
         { class: "sub" },
         h("span", { class: "mono", text: p.host + (p.port ? ":" + p.port : "") }),
-        p.bambu ? h("span", { text: "Serial " + p.bambu.serial + (p.bambu.model ? " · " + p.bambu.model : "") }) : null,
-        h("span", { class: defaults ? "" : "muted", text: defaults ? "Defaults: " + defaults : "No default slicing profiles" }),
+        p.bambu
+          ? h("span", {
+              text: "Serial " + p.bambu.serial + (p.bambu.serial_corrected_from ? ` (corrected from ${p.bambu.serial_corrected_from})` : "") + (p.bambu.model ? " · " + p.bambu.model : ""),
+              title: p.bambu.serial_corrected_from ? "print-bridge read the real serial off the printer, so Print Farm switched to it." : undefined,
+            })
+          : null,
+        h("span", { class: defaults ? "" : "muted", text: defaults ? "Defaults: " + defaults : "Default slicing profiles are picked once OrcaSlicer's profiles are available" }),
       ),
       h(
         "div",
@@ -118,8 +133,9 @@ export function printersView(onChanged: () => void): PrintersView {
         btn("Edit", { cls: "sm", icon: "edit", aria: "Edit " + p.name, onClick: () => openForm(p) }),
         btn("Remove", { cls: "sm danger", icon: "trash", aria: "Remove " + p.name, onClick: () => remove(p) }),
       ),
-      t ? h("div", { class: "testres " + (t.ok === null ? "run" : t.ok ? "ok" : "bad"), role: "status", text: t.ok === null ? "Connecting…" : (t.ok ? "Connected — " : "Failed — ") + t.detail }) : null,
-      p.type === "bambu" && state.diagnostics?.bridge && !state.diagnostics.bridge.reachable
+      t ? h("div", { class: "testres " + (t.ok === null ? "run" : t.ok ? "ok" : "bad"), role: "status", text: t.ok === null ? "Connecting… (up to 40 s)" : (t.ok ? "Connected — " : "Failed — ") + t.detail }) : null,
+      // Only when the automatic setup isn't already showing the bridge state.
+      p.type === "bambu" && state.diagnostics?.bridge && !state.diagnostics.bridge.reachable && (!state.setup?.bridge || state.setup.bridge.status === "ok")
         ? h("div", { class: "pbanner" }, bridgeBanner(state.diagnostics.bridge, () => loadDiagnostics().then(render)))
         : null,
     );
@@ -129,8 +145,9 @@ export function printersView(onChanged: () => void): PrintersView {
     tests.set(p.id, { ok: null, detail: "" });
     render();
     try {
-      const r = await post<{ ok: boolean; detail: string }>(`printers/${encodeURIComponent(p.id)}/test`);
+      const r = await post<{ ok: boolean; detail: string; serial_corrected?: boolean }>(`printers/${encodeURIComponent(p.id)}/test`);
       tests.set(p.id, { ok: r.ok, detail: r.detail || "" });
+      if (r.serial_corrected) await refresh();
     } catch (e) {
       tests.set(p.id, { ok: false, detail: errText(e) });
     }
@@ -299,7 +316,7 @@ export function printersView(onChanged: () => void): PrintersView {
         const slot = h("div");
         const paint = () =>
           slot.replaceChildren(
-            bridgeBanner(state.diagnostics?.bridge, check) ||
+            bridgeBanner(state.diagnostics?.bridge, check, !state.printers.some((x) => x.type === "bambu")) ||
               h("div", { class: "banner info", role: "status" }, icon("info"), h("div", { class: "grow" }, h("b", { text: "Checking print-bridge…" }), h("p", { text: LAN_NOTE }))),
           );
         const check = () => {
@@ -363,7 +380,7 @@ export function printersView(onChanged: () => void): PrintersView {
     if (testBtn) {
       testBtn.onclick = async () => {
         testBtn.disabled = true;
-        testOut.replaceChildren(h("div", { class: "testres run", text: "Testing the saved connection…" }));
+        testOut.replaceChildren(h("div", { class: "testres run", text: "Connecting… (up to 40 s)" }));
         try {
           const r = await post<{ ok: boolean; detail: string }>(`printers/${encodeURIComponent(existing!.id)}/test`);
           testOut.replaceChildren(h("div", { class: "testres " + (r.ok ? "ok" : "bad"), role: "status", text: (r.ok ? "Connected — " : "Failed — ") + r.detail }));
@@ -404,6 +421,13 @@ export function printersView(onChanged: () => void): PrintersView {
     renderTypeFields();
     validate();
   }
+
+  // An install finished: new profiles mean defaults can be picked now, and a
+  // fresh bridge changes the banners.
+  window.addEventListener(SETUP_DONE, () => {
+    refresh();
+    loadDiagnostics().then(render);
+  });
 
   return {
     el,

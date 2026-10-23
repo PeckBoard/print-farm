@@ -39,7 +39,7 @@ npm run typecheck # plugin + ui/
 | Key                 | Default                         | Notes                                                                 |
 | ------------------- | ------------------------------- | --------------------------------------------------------------------- |
 | `bridge_url`        | `http://127.0.0.1:7781`         | print-bridge sidecar                                                  |
-| `bridge_token`      | `~/.config/print-bridge/token`  | secret; sent as `Authorization: Bearer`. Empty = read `${XDG_CONFIG_HOME:-~/.config}/print-bridge/token` (written by App Manager's print-bridge install); never logged or sent to the UI |
+| `bridge_token`      | `~/.config/print-bridge/token`  | secret; sent as `Authorization: Bearer`. Empty = read `${XDG_CONFIG_HOME:-~/.config}/print-bridge/token` (written by the automatic print-bridge install); never logged or sent to the UI |
 | `orca_path`         | `orca-slicer`                   | name on PATH or absolute path (AppImage ok); the default also falls back to `~/.local/bin/orca-slicer`, then flatpak (see OrcaSlicer) |
 | `orca_profiles_dir` | auto-detect                     | `:`-separated vendor roots (`<root>/<Vendor>/{machine,filament,process}`) |
 | `orca_headless`     | `auto`                          | `auto` = wrap in `xvfb-run -a` when no `$DISPLAY`/`$WAYLAND_DISPLAY` and xvfb-run exists; `always`; `never` |
@@ -160,24 +160,45 @@ last with `done: true`. Retry a failed chunk with the `size` the error reports.
   (STL / 3MF models; G-code and `.gcode.3mf` by layer, extrusion vs travel),
   the slice form (printer + Orca vendor / printer / filament / process
   comboboxes), job progress + estimate, and send (upload only, or upload &
-  start after a confirm). `GET diagnostics` problems show as a banner with an
-  App Manager link.
-- **Printers**: add / edit / remove / test connection, per-type fields,
-  saved-secret state, default Orca profiles. Choosing type Bambu (and any Bambu
-  row while the bridge is down) shows the print-bridge status: "Bridge
-  connected vX", or "Bambu printers need the print-bridge helper" with the
-  error (a wrong token says so) and an **Install print-bridge** button deep-
-  linking App Manager (`?install=print-bridge&from=print-farm`).
+  start after a confirm). `GET diagnostics` problems show as a banner.
+- **Printers**: add / edit / remove / test connection ("Connecting… (up to
+  40 s)"), per-type fields, saved-secret state, default Orca profiles. Bambu
+  rows show the print-bridge status and any serial Print Farm corrected.
 
-### print-bridge Setup
+### Zero-Touch Setup
 
-App Manager's `print-bridge` entry installs `~/.local/bin/print-bridge`,
-writes a token to `~/.config/print-bridge/token`, and runs it as a systemd
-user service on `127.0.0.1:7781` — the defaults here, so no settings are
-needed. Print Farm reads that token file when `bridge_token` is empty
-(re-read every ~30s, so a reinstall's new token is picked up). The printer
-must be in LAN Only Mode (plus Developer Mode on recent firmware).
+Nothing needs installing or picking by hand (`src/setup.ts`,
+`src/autoprofiles.ts`). Page load (`GET setup`) and the tools check what's
+missing and start installs as detached background jobs; the page shows a
+"Setting up … (downloading ~N MB)" banner with progress, and on failure the
+installer's own error plus **Retry** (`POST setup/{orca|bridge}/retry`; a
+failed install is not retried on its own for an hour).
 
+- **OrcaSlicer** — when no profile tree is found (and `orca_profiles_dir` is
+  unset): the latest AppImage is extracted (no FUSE, no root) into
+  `~/.local/share/orca-slicer` behind a `~/.local/bin/orca-slicer` wrapper,
+  the same layout as App Manager's recipe. Profile detection follows wrapper
+  scripts (`exec "<path>"`) and symlinks, and checks
+  `~/.local/share/orca-slicer/resources/profiles` directly.
+- **print-bridge** — when a Bambu printer exists and the bridge on the default
+  `127.0.0.1:7781` is missing, unreachable, or older than 0.1.3: the release
+  binary (sha256-checked) into `~/.local/bin`, the existing token kept (or a
+  new one in `~/.config/print-bridge/token`), the systemd user unit written if
+  missing, then `systemctl --user daemon-reload / enable / restart` and a
+  best-effort `loginctl enable-linger`. Without a systemd user manager the
+  banner says how to run it by hand.
+- **Default profiles** — a printer saved (or listed) without defaults gets
+  them: Bambu models (or the serial's model prefix) map to
+  `Bambu Lab <model> 0.4 nozzle`; other printers match their name against the
+  vendors' 0.4 nozzle machine presets. Process and filament come from that
+  preset's `default_print_profile` / `default_filament_profile`.
+- **Serials** — when print-bridge (>= 0.1.3) reports a `detected_serial` from
+  the printer's certificate that differs from the stored one, Print Farm
+  switches to it and the row says "corrected from …".
+
+The printer must still be in LAN Only Mode (plus Developer Mode on recent
+firmware). Print Farm reads the bridge token file when `bridge_token` is
+empty (re-read every ~30s).
 Manual check against a fake printer: `node test/fixtures/fake-moonraker.js
 <port>` (serves a mid-print Moonraker + a JPEG webcam), `node
 test/fixtures/make-samples.js <dir>` (sample STL + G-code), then

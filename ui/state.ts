@@ -28,7 +28,7 @@ export interface Printer {
   has_password: boolean;
   tls_insecure: boolean;
   storage?: string;
-  bambu?: { serial: string; model?: string; has_access_code: boolean };
+  bambu?: { serial: string; model?: string; has_access_code: boolean; serial_corrected_from?: string };
   orca_printer_profile?: string;
   orca_filament_profile?: string;
   orca_process_profile?: string;
@@ -85,7 +85,7 @@ export interface Diagnostics {
   };
   bridge_url: string;
   /// null when not probed (no Bambu printer and `?bridge=1` not asked).
-  bridge: { reachable: boolean; version?: string; token_source: "setting" | "file" | "none"; error?: string } | null;
+  bridge: { reachable: boolean; version?: string; token_source: "setting" | "file" | "none"; error?: string; auth_failed?: boolean } | null;
   profile_roots: { kind: string; path: string }[];
 }
 
@@ -99,6 +99,7 @@ export const state = {
   filesLoaded: false,
   jobs: [] as SliceJob[],
   diagnostics: null as Diagnostics | null,
+  setup: null as Setup | null,
 };
 
 export function printerById(id: string | undefined): Printer | undefined {
@@ -113,6 +114,35 @@ export async function loadPrinters(): Promise<Printer[]> {
 }
 
 // ── Orca profiles (cached per kind+vendor) ─────────────────────────────────
+
+/// Drop cached vendor/profile lists (an install just added profiles).
+export function resetProfileCache(): void {
+  vendorsP = null;
+  profileCache.clear();
+}
+
+/// Automatic installs (GET setup). See src/setup.ts.
+export interface SetupItem {
+  status: "ok" | "running" | "failed";
+  reason?: string;
+  phase?: string;
+  bytes?: number;
+  total?: number;
+  error?: string;
+  log_tail?: string;
+  no_systemd?: boolean;
+  version?: string;
+}
+export interface Setup {
+  orca: SetupItem;
+  bridge: SetupItem | null;
+  notices: string[];
+}
+
+/// Fired on window when an automatic install finishes successfully.
+export const SETUP_DONE = "pf-setup-done";
+/// Fired on window whenever the setup state was (re)loaded.
+export const SETUP_CHANGED = "pf-setup-changed";
 
 let vendorsP: Promise<string[]> | null = null;
 const profileCache = new Map<string, Promise<string[]>>();

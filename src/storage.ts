@@ -35,6 +35,18 @@ export function sh(script: string, args: string[] = [], timeoutSecs = 60): strin
   return r.stdout;
 }
 
+// ── detached jobs ─────────────────────────────────────────────────────────────
+// Each exec may run in its own PID namespace, so a later poll's `kill -0`
+// can't see a job started by an earlier call. Jobs (with `$d` = their dir)
+// touch `$d/hb` every 5 s until they write `$d/exit`; polls (with `$d` and
+// `$pid`) count a fresh heartbeat as alive. No single quotes: both go inside
+// single-quoted `sh -c` scripts.
+
+export const JOB_HEARTBEAT = '(while [ ! -e "$d/exit" ]; do touch "$d/hb"; sleep 5; done) &';
+export const JOB_ALIVE =
+  'if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then echo 1; ' +
+  'elif [ -e "$d/hb" ] && [ $(( $(date +%s) - $(stat -c %Y "$d/hb") )) -lt 30 ]; then echo 1; else echo 0; fi';
+
 // ── storage dir ─────────────────────────────────────────────────────────────
 
 let cachedDir: string | null = null;

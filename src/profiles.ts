@@ -113,18 +113,76 @@ export function isBambuMachine(profile: Record<string, unknown>, vendor?: string
 
 // ── root detection ──────────────────────────────────────────────────────────
 
+/// The program a wrapper script hands off to: the first `exec <path> …` line
+/// (App Manager's `~/.local/bin/orca-slicer` is `exec "$HOME/.local/share/
+/// orca-slicer/AppRun" "$@"`), with `$HOME` / `${HOME}` / `~` expanded.
+/// Null when there's no such line or the path still has unexpanded `$`. Pure.
+export function parseWrapperExec(text: string, home: string): string | null {
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const m = /^exec\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const rest = m[1].trim();
+    let p: string;
+    if (rest[0] === '"' || rest[0] === "'") {
+      const end = rest.indexOf(rest[0], 1);
+      if (end < 0) return null;
+      p = rest.slice(1, end);
+    } else {
+      p = rest.split(/\s+/)[0];
+    }
+    p = p.replace(/\$\{HOME\}|\$HOME\b/g, home);
+    if (p === "~" || p.startsWith("~/")) p = home + p.slice(1);
+    if (!p || p.includes("$") || !p.startsWith("/")) return null;
+    return p;
+  }
+  return null;
+}
+
+// $1 = configured command. Prints the resolved binary and, when it is a small
+// script, its text (so a wrapper's exec target can be followed).
+const BIN_PROBE = `
+o=$1
+b=$(command -v "$o" 2>/dev/null) || b=""
+if [ -z "$b" ] && [ "$o" = orca-slicer ] && [ -x "$HOME/.local/bin/orca-slicer" ]; then b="$HOME/.local/bin/orca-slicer"; fi
+printf 'home=%s\\n' "$HOME"
+[ -n "$b" ] || exit 0
+r=$(readlink -f "$b" 2>/dev/null) || r=$b
+printf 'bin=%s\\n' "$r"
+if [ -f "$r" ] && [ "$(wc -c < "$r")" -lt 4096 ] && [ "$(head -c 2 "$r")" = '#!' ]; then echo @@WRAPPER; cat "$r"; fi
+true
+`;
+
+/// Parse BIN_PROBE output into the binary and (for a wrapper) its target. Pure.
+export function parseBinProbe(out: string): { bin: string; target: string } {
+  const at = out.indexOf("@@WRAPPER\n");
+  const head = at >= 0 ? out.slice(0, at) : out;
+  const kv: Record<string, string> = {};
+  for (const line of head.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0) kv[line.slice(0, i)] = line.slice(i + 1);
+  }
+  const target = at >= 0 && kv.home ? parseWrapperExec(out.slice(at + 10), kv.home) ?? "" : "";
+  return { bin: kv.bin ?? "", target };
+}
+
+// $1 = explicit roots, $2 = the resolved binary, $3 = a wrapper's exec target.
 const ROOTS_SCRIPT = `
-explicit=$1; orca=$2
+explicit=$1
 emit() { [ -d "$2" ] && printf '%s\\t%s\\n' "$1" "$(cd "$2" && pwd -P)"; }
 if [ -n "$explicit" ]; then
   old=$IFS; IFS=:; for d in $explicit; do emit system "$d"; done; IFS=$old
 fi
-bin=$(command -v "$orca" 2>/dev/null) && bin=$(readlink -f "$bin" 2>/dev/null) && {
-  bd=$(dirname "$bin")
-  emit system "$bd/../resources/profiles"; emit system "$bd/resources/profiles"
-  emit system "$bd/../share/OrcaSlicer/resources/profiles"
-}
-for d in /usr/share/OrcaSlicer/resources/profiles /usr/local/share/OrcaSlicer/resources/profiles \\
+for b in "$2" "$3"; do
+  [ -n "$b" ] || continue
+  b=$(readlink -f "$b" 2>/dev/null) || continue
+  bd=$(dirname "$b")
+  emit system "$bd/resources/profiles"; emit system "$bd/../resources/profiles"
+  emit system "$bd/../share/OrcaSlicer/resources/profiles"; emit system "$bd/usr/share/OrcaSlicer/resources/profiles"
+done
+for d in "$HOME/.local/share/orca-slicer/resources/profiles" "$HOME/.local/share/orca-slicer/usr/share/OrcaSlicer/resources/profiles" \\
+  "$HOME/Applications/squashfs-root/resources/profiles" \\
+  /usr/share/OrcaSlicer/resources/profiles /usr/local/share/OrcaSlicer/resources/profiles \\
   /opt/OrcaSlicer/resources/profiles /opt/orca-slicer/resources/profiles /app/share/OrcaSlicer/resources/profiles \\
   /var/lib/flatpak/app/com.orcaslicer.OrcaSlicer/current/active/files/share/OrcaSlicer/resources/profiles \\
   "$HOME/.local/share/flatpak/app/com.orcaslicer.OrcaSlicer/current/active/files/share/OrcaSlicer/resources/profiles" \\
@@ -141,8 +199,28 @@ done
 true
 `;
 
+// Detection runs a few execs; status polls and tool calls hit it often, and
+// an install finishing calls invalidateRoots().
+const ROOTS_TTL_MS = 20_000;
+let rootsMemo: { key: string; at: number; roots: ProfileRoot[] } | null = null;
+
+export function invalidateRoots(): void {
+  rootsMemo = null;
+}
+
 export function detectRoots(): ProfileRoot[] {
-  return parseRoots(sh(ROOTS_SCRIPT, [orcaProfilesDir(), orcaPath()], 30));
+  const key = orcaProfilesDir() + "\n" + orcaPath();
+  const now = Date.now();
+  if (rootsMemo && rootsMemo.key === key && now - rootsMemo.at < ROOTS_TTL_MS) return rootsMemo.roots;
+  const { bin, target } = parseBinProbe(sh(BIN_PROBE, [orcaPath()], 30));
+  const roots = parseRoots(sh(ROOTS_SCRIPT, [orcaProfilesDir(), bin, target], 30));
+  rootsMemo = { key, at: now, roots };
+  return roots;
+}
+
+/// Identity of the current roots — cache keys change when an install adds one.
+export function rootsSig(roots: ProfileRoot[]): string {
+  return roots.map((r) => r.path).join(":");
 }
 
 // ── scanning ────────────────────────────────────────────────────────────────
@@ -206,7 +284,7 @@ export function scanProfiles(roots: ProfileRoot[], vendor: string, kind: Profile
   const key = `${vendor}|${kind}`;
   if (!refresh) {
     const hit = storeGet(INDEX, key);
-    if (hit && Array.isArray(hit.entries) && hit.roots === roots.map((r) => r.path).join(":")) return hit.entries;
+    if (hit && Array.isArray(hit.entries) && hit.entries.length && hit.roots === rootsSig(roots)) return hit.entries;
   }
   let entries: ProfileEntry[] = [];
   if (vendor === "User") {
@@ -223,9 +301,34 @@ export function scanProfiles(roots: ProfileRoot[], vendor: string, kind: Profile
     }
   }
   entries = entries.filter((e) => !e.type || e.type === KIND_TYPE[kind]);
-  const doc = { roots: roots.map((r) => r.path).join(":"), entries };
-  if (JSON.stringify(doc).length < CACHE_MAX) storePut(INDEX, key, doc);
+  // Never cache an empty scan: it would outlive the install that fills it.
+  const doc = { roots: rootsSig(roots), entries };
+  if (entries.length && JSON.stringify(doc).length < CACHE_MAX) storePut(INDEX, key, doc);
   return entries;
+}
+
+/// Parse `<Vendor>/machine/<Name>.json` lines. Pure.
+export function parseMachineFiles(out: string): { vendor: string; name: string }[] {
+  const res: { vendor: string; name: string }[] = [];
+  for (const line of out.split("\n")) {
+    const m = /^([^/]+)\/machine\/(.+)\.json$/.exec(line.trim());
+    if (m) res.push({ vendor: m[1], name: m[2] });
+  }
+  return res;
+}
+
+/// Every vendor machine preset by file name (Orca names files after the
+/// preset), across the system roots; the first root carrying a vendor wins.
+export function listMachineFiles(roots: ProfileRoot[]): { vendor: string; name: string }[] {
+  const seen = new Set<string>();
+  const out: { vendor: string; name: string }[] = [];
+  for (const r of roots.filter((x) => x.kind === "system")) {
+    const files = parseMachineFiles(sh('cd "$1" && for f in */machine/*.json; do [ -f "$f" ] && echo "$f"; done; true', [r.path], 60));
+    const vendors = new Set(files.map((f) => f.vendor));
+    for (const f of files) if (!seen.has(f.vendor)) out.push(f);
+    vendors.forEach((v) => seen.add(v));
+  }
+  return out;
 }
 
 function readJson(path: string): Record<string, unknown> {

@@ -32,6 +32,11 @@ export function resolveBridgeToken(setting: string, readFile: () => string): { t
 const TOKEN_FILE_TTL_MS = 30_000;
 let tokenFile: { value: string; at: number } | null = null;
 
+/// Forget the cached token file (an install may just have written it).
+export function invalidateBridgeToken(): void {
+  tokenFile = null;
+}
+
 /// `${XDG_CONFIG_HOME:-~/.config}/print-bridge/token`, or "" when absent.
 /// The token is never logged or returned to the UI.
 function readBridgeTokenFile(): string {

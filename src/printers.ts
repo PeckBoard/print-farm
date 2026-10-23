@@ -18,7 +18,7 @@ export interface RedactedPrinter {
   username?: string;
   has_api_key: boolean;
   has_password: boolean;
-  bambu?: { serial: string; model?: string; has_access_code: boolean };
+  bambu?: { serial: string; model?: string; has_access_code: boolean; serial_corrected_from?: string };
   tls_insecure: boolean;
   storage?: string;
   orca_printer_profile?: string;
@@ -42,6 +42,7 @@ export function redact(p: PrinterRecord): RedactedPrinter {
   if (p.bambu) {
     out.bambu = { serial: p.bambu.serial, has_access_code: !!p.bambu.access_code };
     if (p.bambu.model) out.bambu.model = p.bambu.model;
+    if (p.bambu.serial_corrected_from) out.bambu.serial_corrected_from = p.bambu.serial_corrected_from;
   }
   for (const k of ["orca_printer_profile", "orca_filament_profile", "orca_process_profile"] as const) {
     if (p[k]) out[k] = p[k];
@@ -112,6 +113,7 @@ export function buildPrinter(input: any, existing: PrinterRecord | null, idf: ()
     if (!access_code) throw new Error("bambu.access_code is required for a Bambu printer");
     rec.bambu = { serial, access_code };
     if (model) rec.bambu.model = model;
+    if (prev?.serial_corrected_from && serial === prev.serial) rec.bambu.serial_corrected_from = prev.serial_corrected_from;
   }
   return rec;
 }
@@ -150,4 +152,16 @@ export function savePrinter(input: any, existing: PrinterRecord | null): Printer
 
 export function deletePrinter(id: string): void {
   storeDelete(COLLECTION, id);
+}
+
+/// Store a record as-is (automatic fixes: defaults, corrected serials).
+export function putPrinter(p: PrinterRecord): void {
+  storePut(COLLECTION, p.id, p);
+}
+
+/// Switch a Bambu printer to the serial print-bridge read off the printer,
+/// remembering what was there. Pure — tested.
+export function withCorrectedSerial(p: PrinterRecord, serial: string): PrinterRecord {
+  if (!p.bambu || p.bambu.serial === serial) return p;
+  return { ...p, bambu: { ...p.bambu, serial, serial_corrected_from: p.bambu.serial_corrected_from || p.bambu.serial } };
 }

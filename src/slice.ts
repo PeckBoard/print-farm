@@ -17,7 +17,7 @@
 import { storeGet, storePut, storeList } from "./host";
 import { nextSeq } from "./counter";
 import { orcaPath, orcaHeadless, DEFAULT_ORCA_PATH } from "./config";
-import { sh, storageDir, requireFile, newFileRecord, putFile, headTail, FileRecord, writeText } from "./storage";
+import { sh, storageDir, requireFile, newFileRecord, putFile, headTail, FileRecord, writeText, JOB_HEARTBEAT, JOB_ALIVE } from "./storage";
 import { parseGcodeEstimate, GcodeEstimate } from "./gcode";
 import { resolveProfile, isBambuMachine } from "./profiles";
 import { getPrinter } from "./printers";
@@ -233,7 +233,7 @@ const LAUNCH = [
   'dir=$1; shift',
   'mkdir -p "$dir/out" || exit 1',
   'cd "$dir/out" || exit 1',
-  `nohup sh -c 'd=$1; shift; "$@" > "$d/orca.log" 2>&1; echo $? > "$d/exit"' sh "$dir" "$@" > /dev/null 2>&1 < /dev/null &`,
+  `nohup sh -c 'd=$1; shift; ${JOB_HEARTBEAT} "$@" > "$d/orca.log" 2>&1; echo $? > "$d/exit"' sh "$dir" "$@" > /dev/null 2>&1 < /dev/null &`,
   'echo $!',
 ].join("\n");
 
@@ -290,7 +290,7 @@ export function startSlice(req: SliceRequest): SliceJob {
 const POLL = [
   'd=$1; pid=$2',
   'echo @@EXIT; cat "$d/exit" 2>/dev/null',
-  'echo @@ALIVE; if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then echo 1; else echo 0; fi',
+  `echo @@ALIVE; ${JOB_ALIVE}`,
   'echo @@LS; ls -1 "$d/out" 2>/dev/null',
   'echo @@RESULT; cat "$d/out/result.json" 2>/dev/null',
   'echo @@LOG; tail -c 3000 "$d/orca.log" 2>/dev/null',
