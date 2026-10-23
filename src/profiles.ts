@@ -10,7 +10,10 @@
 // within the same vendor; filaments also inherit from `OrcaFilamentLibrary`,
 // user presets from any system preset). The CLI's `--load-settings` /
 // `--load-filaments` want a self-contained file, so we flatten the chain
-// (root → leaf, later keys win) and drop `inherits`.
+// (root → leaf, later keys win). The CLI still reads `from` / `inherits` to
+// name the printer's and process's *system* preset, and only slices when the
+// process's `compatible_printers` lists that system name — see
+// cliSystemName and makeCliCompatible.
 
 import { sh } from "./storage";
 import { orcaPath, orcaProfilesDir } from "./config";
@@ -79,10 +82,29 @@ export function parseScan(out: string, root: string, vendor: string, source: "sy
   return entries;
 }
 
+/// Which chain members (root → leaf) are instantiable vendor (system)
+/// presets. `from` is inherited when a file omits it; `instantiation` is not
+/// (base presets say "false", a missing value means instantiable).
+function systemFlags(chain: Record<string, unknown>[]): boolean[] {
+  let from = "";
+  return chain.map((obj) => {
+    if (typeof obj.from === "string") from = obj.from.toLowerCase();
+    return from === "system" && String(obj.instantiation ?? "true") !== "false";
+  });
+}
+
 /// Flatten an `inherits` chain into one self-contained profile. `lookup`
 /// returns a parsed profile by preset name (null = not found). Pure — tested.
+///
+/// The result keeps the identity OrcaSlicer's CLI compares by (src/
+/// OrcaSlicer.cpp, "process not compatible with printer"): a system preset
+/// stays `from: "system"` (its system name is its own name); a user preset
+/// becomes `from: "User"` with `inherits` = its nearest system ancestor. A
+/// flattened copy with `inherits` dropped reads as system name "", which no
+/// `compatible_printers` list contains → CLI_PROCESS_NOT_COMPATIBLE (239).
 export function flattenProfile(leaf: string, lookup: (name: string) => Record<string, unknown> | null): Record<string, unknown> {
   const chain: Record<string, unknown>[] = [];
+  const names: string[] = [];
   const seen = new Set<string>();
   let name = leaf;
   while (name) {
@@ -94,15 +116,54 @@ export function flattenProfile(leaf: string, lookup: (name: string) => Record<st
       throw new Error(chain.length === 0 ? `profile '${name}' not found` : `parent profile '${name}' not found (inherited by '${leaf}')`);
     }
     chain.unshift(obj);
+    names.unshift(name);
     name = typeof obj.inherits === "string" ? obj.inherits.trim() : "";
   }
   const merged: Record<string, unknown> = {};
   for (const obj of chain) Object.assign(merged, obj);
-  delete merged.inherits;
   merged.name = leaf;
-  // A flattened copy is no longer the vendor's system preset.
-  merged.from = "User";
+  const system = systemFlags(chain);
+  const leafAt = chain.length - 1;
+  if (system[leafAt]) {
+    merged.from = "system";
+    delete merged.inherits;
+  } else {
+    merged.from = "User";
+    let parent = "";
+    for (let i = leafAt - 1; i >= 0 && !parent; i--) if (system[i]) parent = names[i];
+    if (parent) merged.inherits = parent;
+    else delete merged.inherits;
+  }
   return merged;
+}
+
+/// The system preset name OrcaSlicer's CLI matches a flattened preset by. Pure.
+export function cliSystemName(profile: Record<string, unknown>): string {
+  if (String(profile.from ?? "").toLowerCase() === "system") return String(profile.name ?? "");
+  return String(profile.inherits ?? "");
+}
+
+/// Make the chosen process (and filament) acceptable to the CLI for the chosen
+/// printer: its `compatible_printers` must contain the printer's system name
+/// (an empty list does NOT mean "any" on the CLI). The user picked these
+/// presets together, so the pairing is theirs to make. Returns new objects.
+/// Pure — tested.
+export function makeCliCompatible(
+  machine: Record<string, unknown>,
+  process: Record<string, unknown>,
+  filament: Record<string, unknown>,
+): { machine: Record<string, unknown>; process: Record<string, unknown>; filament: Record<string, unknown> } {
+  const printer = cliSystemName(machine) || String(machine.name ?? "");
+  const withPrinter = (p: Record<string, unknown>, always: boolean) => {
+    const list = Array.isArray(p.compatible_printers) ? (p.compatible_printers as unknown[]).map(String) : [];
+    if (list.includes(printer) || (!always && !list.length)) return { ...p };
+    return { ...p, compatible_printers: [...list, printer], compatible_printers_condition: "" };
+  };
+  return {
+    machine: { ...machine },
+    process: withPrinter(process, true),
+    filament: withPrinter(filament, false),
+  };
 }
 
 /// Is this machine profile a Bambu Lab printer (→ slice to .gcode.3mf)?

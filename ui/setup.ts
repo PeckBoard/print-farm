@@ -22,6 +22,8 @@ function phaseText(name: "orca" | "bridge", s: SetupItem): string {
       return "Installing…";
     case "start":
       return "Starting the service…";
+    case "libs":
+      return "Fetching system libraries OrcaSlicer needs (no root needed)…";
     case "resolve":
       return "Finding the latest release…";
     default:

@@ -3,4 +3,5 @@ dist/
 .tooling/
 test/.tmp-shell/
 test/.tmp-setup/
+test/.tmp-strip3mf/
 src/generated/

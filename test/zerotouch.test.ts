@@ -14,6 +14,11 @@ describe("wrapper resolution", () => {
     const text = '#!/bin/sh\nexec "$HOME/.local/share/orca-slicer/AppRun" "$@"\n';
     expect(parseWrapperExec(text, "/home/u")).toBe("/home/u/.local/share/orca-slicer/AppRun");
   });
+  it("skips the wrapper's LD_LIBRARY_PATH export line", () => {
+    const text =
+      '#!/bin/sh\nexport LD_LIBRARY_PATH="$HOME/.local/share/orca-slicer/extra-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$HOME/.local/share/orca-slicer/AppRun" "$@"\n';
+    expect(parseWrapperExec(text, "/home/u")).toBe("/home/u/.local/share/orca-slicer/AppRun");
+  });
   it("handles ${HOME}, ~, single quotes and bare paths", () => {
     expect(parseWrapperExec("exec '${HOME}/x/AppRun' \"$@\"", "/h")).toBe("/h/x/AppRun");
     expect(parseWrapperExec("#!/bin/sh\nset -e\n  exec ~/apps/orca/AppRun \"$@\"", "/h")).toBe("/h/apps/orca/AppRun");

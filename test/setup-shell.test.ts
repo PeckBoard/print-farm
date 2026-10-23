@@ -32,7 +32,7 @@ vi.mock("../src/host", () => ({
   },
 }));
 
-import { ORCA_INSTALL, BRIDGE_INSTALL, ensureSetup, invalidateSetup } from "../src/setup";
+import { ORCA_INSTALL, ORCA_LIBS_INSTALL, BRIDGE_INSTALL, ensureSetup, invalidateSetup } from "../src/setup";
 import { detectRoots, invalidateRoots } from "../src/profiles";
 import { autoFill } from "../src/autoprofiles";
 import { PrinterRecord } from "../src/drivers/types";
@@ -149,7 +149,9 @@ describe("OrcaSlicer auto-install", () => {
       s = ensureSetup();
     }
     expect(s.orca, JSON.stringify(s.orca)).toMatchObject({ status: "ok" });
-    expect(readFileSync(join(HOME, ".local/bin/orca-slicer"), "utf8")).toBe('#!/bin/sh\nexec "$HOME/.local/share/orca-slicer/AppRun" "$@"\n');
+    expect(readFileSync(join(HOME, ".local/bin/orca-slicer"), "utf8")).toBe(
+      '#!/bin/sh\nexport LD_LIBRARY_PATH="$HOME/.local/share/orca-slicer/extra-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$HOME/.local/share/orca-slicer/AppRun" "$@"\n',
+    );
     expect(existsSync(join(HOME, ".local/share/orca-slicer/VERSION"))).toBe(true);
     // The wrapper isn't on PATH here; detection still finds the bundled tree.
     expect(detectRoots()).toContainEqual({ kind: "system", path: join(HOME, ".local/share/orca-slicer/resources/profiles") });
@@ -181,5 +183,57 @@ describe("OrcaSlicer auto-install", () => {
     expect(ensureSetup().orca.status).toBe("failed"); // no automatic loop
     env.PF_ORCA_RELEASES = "file://" + join(ROOT, "orca-releases");
     expect(ensureSetup("orca").orca.status).toBe("running"); // Retry
+  });
+});
+
+describe("OrcaSlicer missing-library fix", () => {
+  // Stub ldd: libGLU is "not found" unless the first LD_LIBRARY_PATH dir (the
+  // install's extra-lib) has it; libnope.so.7 is missing when MISS_NOPE=1.
+  // Stub apt-get/dpkg-deb: only libglu1-mesa exists, and unpacks the real
+  // .so + its soname symlink.
+  beforeAll(async () => {
+    // Let the Retry install above finish first: it replaces the same tree.
+    for (let i = 0; i < 100 && ensureSetup().orca.status === "running"; i++) await new Promise((r) => setTimeout(r, 100));
+    writeFileSync(
+      join(BIN, "ldd"),
+      `#!/bin/sh\nx=\${LD_LIBRARY_PATH%%:*}\n[ -e "$x/libGLU.so.1" ] || printf '\\tlibGLU.so.1 => not found\\n'\n[ "$MISS_NOPE" = 1 ] && printf '\\tlibnope.so.7 => not found\\n'\nprintf '\\tlibc.so.6 => /lib/libc.so.6\\n'\n`,
+    );
+    writeFileSync(join(BIN, "apt-get"), `#!/bin/sh\necho "$@" >> "$HOME/apt.log"\n[ "$1" = download ] && [ "$2" = libglu1-mesa ] && touch libglu1-mesa_9.0.2_amd64.deb && exit 0\nexit 100\n`);
+    writeFileSync(
+      join(BIN, "dpkg-deb"),
+      `#!/bin/sh\n[ "$1" = -x ] || exit 2\nl="$3/usr/lib/x86_64-linux-gnu"; mkdir -p "$l"; echo so > "$l/libGLU.so.1.3.1"; ln -sf libGLU.so.1.3.1 "$l/libGLU.so.1"\n`,
+    );
+    for (const f of ["ldd", "apt-get", "dpkg-deb"]) chmodSync(join(BIN, f), 0o755);
+  });
+  const O = () => join(HOME, ".local/share/orca-slicer");
+  const fakeInstall = () => {
+    rmSync(O(), { recursive: true, force: true });
+    mkdirSync(join(O(), "bin"), { recursive: true });
+    writeFileSync(join(O(), "bin/orca-slicer"), "#!/bin/sh\n");
+    chmodSync(join(O(), "bin/orca-slicer"), 0o755);
+  };
+
+  it("fetches the package rootless into extra-lib", () => {
+    fakeInstall();
+    const r = run(ORCA_LIBS_INSTALL, join(ROOT, "job-libs"));
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain("fetched libGLU.so.1 from libglu1-mesa");
+    expect(readFileSync(join(O(), "extra-lib/libGLU.so.1.3.1"), "utf8")).toBe("so\n");
+    expect(existsSync(join(O(), "extra-lib/libGLU.so.1"))).toBe(true);
+    // Already fixed: a second run does nothing.
+    expect(run(ORCA_LIBS_INSTALL, join(ROOT, "job-libs")).stdout).not.toContain("fetched");
+  });
+
+  it("tries the Debian name guess for unmapped libs and fails naming what's left", () => {
+    fakeInstall();
+    const r = run(ORCA_LIBS_INSTALL, join(ROOT, "job-libs2"), { MISS_NOPE: "1" });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("fetched libGLU.so.1");
+    expect(r.stderr).toContain("OrcaSlicer still can't load libnope.so.7");
+    expect(readFileSync(join(HOME, "apt.log"), "utf8")).toMatch(/download libnope7\ndownload libnope7t64/);
+  });
+
+  it("is part of the full install too", () => {
+    expect(ORCA_INSTALL).toContain("\nfix_libs\n");
   });
 });

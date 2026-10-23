@@ -129,10 +129,106 @@ export function failureReason(log: string, exitCode: number | null): string {
 /// Content-Length of a URL after redirects, into $d/total (best effort).
 const SIZE_OF = `size_of() { curl -fsSLI "$1" 2>/dev/null | awk 'tolower($1)=="content-length:"{n=$2} END{gsub(/[^0-9]/,"",n); print n+0}' > "$d/total" || true; }`;
 
+/// Shared libraries OrcaSlicer's Linux AppImage links against but doesn't
+/// bundle, which minimal / server hosts often lack (Ubuntu 26.04 ships no
+/// libGLU by default) → candidate packages per package format, first that
+/// downloads wins (Ubuntu 24.04+ renamed some with a `t64` suffix). Unmapped
+/// libraries fall back to the Debian naming guess `libfoo.so.N` → `libfooN`.
+export const LIB_PACKAGES: Record<string, { deb: string[]; rpm: string[] }> = {
+  "libGLU.so.1": { deb: ["libglu1-mesa"], rpm: ["mesa-libGLU"] },
+  "libGL.so.1": { deb: ["libgl1"], rpm: ["libglvnd-glx"] },
+  "libOpenGL.so.0": { deb: ["libopengl0"], rpm: ["libglvnd-opengl"] },
+  "libEGL.so.1": { deb: ["libegl1"], rpm: ["libglvnd-egl"] },
+  "libGLX.so.0": { deb: ["libglx0"], rpm: ["libglvnd-glx"] },
+  "libGLdispatch.so.0": { deb: ["libglvnd0"], rpm: ["libglvnd"] },
+  "libgtk-3.so.0": { deb: ["libgtk-3-0t64", "libgtk-3-0"], rpm: ["gtk3"] },
+  "libgdk-3.so.0": { deb: ["libgtk-3-0t64", "libgtk-3-0"], rpm: ["gtk3"] },
+  "libwebkit2gtk-4.1.so.0": { deb: ["libwebkit2gtk-4.1-0"], rpm: ["webkit2gtk4.1"] },
+  "libjavascriptcoregtk-4.1.so.0": { deb: ["libjavascriptcoregtk-4.1-0"], rpm: ["webkit2gtk4.1"] },
+  "libsoup-3.0.so.0": { deb: ["libsoup-3.0-0"], rpm: ["libsoup3"] },
+  "libgstreamer-1.0.so.0": { deb: ["libgstreamer1.0-0"], rpm: ["gstreamer1"] },
+  "libgstbase-1.0.so.0": { deb: ["libgstreamer1.0-0"], rpm: ["gstreamer1"] },
+  "libgstapp-1.0.so.0": { deb: ["libgstreamer-plugins-base1.0-0"], rpm: ["gstreamer1-plugins-base"] },
+  "libgstvideo-1.0.so.0": { deb: ["libgstreamer-plugins-base1.0-0"], rpm: ["gstreamer1-plugins-base"] },
+  "libgstaudio-1.0.so.0": { deb: ["libgstreamer-plugins-base1.0-0"], rpm: ["gstreamer1-plugins-base"] },
+  "libgstpbutils-1.0.so.0": { deb: ["libgstreamer-plugins-base1.0-0"], rpm: ["gstreamer1-plugins-base"] },
+  "libsecret-1.so.0": { deb: ["libsecret-1-0"], rpm: ["libsecret"] },
+  "libnotify.so.4": { deb: ["libnotify4"], rpm: ["libnotify"] },
+  "libSM.so.6": { deb: ["libsm6"], rpm: ["libSM"] },
+  "libICE.so.6": { deb: ["libice6"], rpm: ["libICE"] },
+  "libXxf86vm.so.1": { deb: ["libxxf86vm1"], rpm: ["libXxf86vm"] },
+  "libxkbcommon.so.0": { deb: ["libxkbcommon0"], rpm: ["libxkbcommon"] },
+  "libfuse.so.2": { deb: ["libfuse2t64", "libfuse2"], rpm: ["fuse-libs"] },
+};
+
+/// The shell `case` behind `pkgs_for <lib> <deb|rpm>` (LIB_PACKAGES plus the
+/// Debian naming guess). Pure — tested.
+export function libPackagesCase(): string {
+  const arms: string[] = [];
+  for (const [lib, p] of Object.entries(LIB_PACKAGES)) {
+    arms.push(`    ${lib}:deb) echo ${p.deb.join(" ")} ;;`, `    ${lib}:rpm) echo ${p.rpm.join(" ")} ;;`);
+  }
+  return [
+    "pkgs_for() {",
+    '  case "$1:$2" in',
+    ...arms,
+    '    *:deb) b=${1%%.so*}; v=${1##*.so.}; [ "$v" = "$1" ] && v=""; g=$(printf %s "$b$v" | tr A-Z_ a-z-); echo "$g" "${g}t64" ;;',
+    "    *) echo ;;",
+    "  esac",
+    "}",
+  ].join("\n");
+}
+
+/// `fix_libs` (needs $d): find the shared libraries the extracted OrcaSlicer
+/// can't load (`ldd` with the dirs its launcher adds), fetch each one's
+/// package WITHOUT root (`apt-get download` + `dpkg-deb -x`, or `dnf
+/// download` + `rpm2cpio | cpio`), and copy the library into
+/// ~/.local/share/orca-slicer/extra-lib — which slice.ts puts on
+/// LD_LIBRARY_PATH. Fails (listing them) if any stay missing.
+export const ORCA_LIBFIX = `${libPackagesCase()}
+fix_libs() (
+  set +e
+  O="$HOME/.local/share/orca-slicer"; X="$O/extra-lib"
+  [ -x "$O/bin/orca-slicer" ] || exit 0
+  command -v ldd >/dev/null 2>&1 || exit 0
+  missing() { LD_LIBRARY_PATH="$X:$O/lib/orca-runtime:$O/lib:$O/bin" ldd "$O/bin/orca-slicer" 2>/dev/null | awk '/not found/{print $1}' | sort -u; }
+  m=$(missing)
+  [ -n "$m" ] || exit 0
+  echo libs > "$d/phase"
+  echo "OrcaSlicer can't load: $(echo $m)"
+  if command -v apt-get >/dev/null 2>&1 && command -v dpkg-deb >/dev/null 2>&1; then pm=deb
+  elif command -v dnf >/dev/null 2>&1 && command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then pm=rpm
+  else echo "OrcaSlicer needs $(echo $m), and this host has no apt-get or dnf to fetch them without root — install them with your package manager" >&2; exit 1; fi
+  mkdir -p "$X"; t="$d/libtmp"
+  for lib in $m; do
+    got=""
+    for p in $(pkgs_for "$lib" "$pm"); do
+      rm -rf "$t"; mkdir -p "$t/pkg" "$t/x"
+      if [ "$pm" = deb ]; then
+        (cd "$t/pkg" && apt-get download "$p" >/dev/null 2>&1) || continue
+        for f in "$t"/pkg/*.deb; do dpkg-deb -x "$f" "$t/x"; done
+      else
+        (cd "$t/pkg" && dnf download -q "$p" >/dev/null 2>&1) || continue
+        for f in "$t"/pkg/*.rpm; do (cd "$t/x" && rpm2cpio "$f" | cpio -idm --quiet); done
+      fi
+      n=0
+      for f in $(find "$t/x" \\( -type f -o -type l \\) -name "$lib*"); do cp -P "$f" "$X/" && n=$((n + 1)); done
+      [ "$n" -gt 0 ] || continue
+      echo "fetched $lib from $p"; got=1; break
+    done
+    [ -n "$got" ] || echo "couldn't fetch $lib automatically" >&2
+  done
+  rm -rf "$t"
+  left=$(missing)
+  [ -z "$left" ] || { echo "OrcaSlicer still can't load $(echo $left) — install the package(s) providing them" >&2; exit 1; }
+  echo "OrcaSlicer's missing libraries are in $X"
+)`;
+
 export const ORCA_INSTALL = `set -e
 d=$1
 rel=\${PF_ORCA_RELEASES:-https://github.com/SoftFever/OrcaSlicer/releases}
 ${SIZE_OF}
+${ORCA_LIBFIX}
 case "$(uname -m)" in x86_64|amd64) arch="" ;; aarch64|arm64) arch="_aarch64" ;;
   *) echo "OrcaSlicer has no Linux build for this architecture ($(uname -m))" >&2; exit 1 ;; esac
 command -v curl >/dev/null 2>&1 || { echo "curl is not installed on this host" >&2; exit 1; }
@@ -151,13 +247,23 @@ chmod +x "$tmp/orca.AppImage"
 [ -d "$tmp/squashfs-root" ] || { echo "the AppImage didn't extract" >&2; exit 1; }
 echo install > "$d/phase"
 mkdir -p "$HOME/.local/share" "$HOME/.local/bin"
+keep="$tmp/extra-lib"; [ -d "$HOME/.local/share/orca-slicer/extra-lib" ] && mv "$HOME/.local/share/orca-slicer/extra-lib" "$keep"
 rm -rf "$HOME/.local/share/orca-slicer"
 mv "$tmp/squashfs-root" "$HOME/.local/share/orca-slicer"
+[ -d "$keep" ] && mv "$keep" "$HOME/.local/share/orca-slicer/extra-lib"
 echo "$ver" > "$HOME/.local/share/orca-slicer/VERSION"
-printf '#!/bin/sh\\nexec "$HOME/.local/share/orca-slicer/AppRun" "$@"\\n' > "$HOME/.local/bin/orca-slicer"
+printf '#!/bin/sh\\nexport LD_LIBRARY_PATH="$HOME/.local/share/orca-slicer/extra-lib\${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\\nexec "$HOME/.local/share/orca-slicer/AppRun" "$@"\\n' > "$HOME/.local/bin/orca-slicer"
 chmod +x "$HOME/.local/bin/orca-slicer"
 rm -rf "$tmp"
 echo "OrcaSlicer $ver installed to ~/.local/share/orca-slicer"
+fix_libs
+`;
+
+/// An existing extracted install that can't load some libraries: fix only that.
+export const ORCA_LIBS_INSTALL = `set -e
+d=$1
+${ORCA_LIBFIX}
+fix_libs
 `;
 
 function shQuote(s: string): string {
@@ -249,9 +355,9 @@ function getJob(name: SetupName): SetupJob | null {
   return (storeGet(JOBS, name) as SetupJob) ?? null;
 }
 
-function startJob(name: SetupName, reason: string): SetupJob {
+function startJob(name: SetupName, reason: string, script: string = SCRIPTS[name]): SetupJob {
   const dir = `${storageDir()}/setup/${name}`;
-  const pid = Number(sh(LAUNCH, [dir, SCRIPTS[name]], 30).trim());
+  const pid = Number(sh(LAUNCH, [dir, script], 30).trim());
   const job: SetupJob = { name, status: "running", reason, dir, pid: isFinite(pid) ? pid : 0, started_at: Date.now() };
   storePut(JOBS, name, job);
   return job;
@@ -272,8 +378,10 @@ function pollJob(job: SetupJob): { job: SetupJob; view: SetupView } {
   if (exited && exitCode === 0) {
     next.status = "succeeded";
     delete next.error;
-    if (job.name === "orca") invalidateRoots();
-    else invalidateBridgeToken();
+    if (job.name === "orca") {
+      invalidateRoots();
+      libsMemo = null;
+    } else invalidateBridgeToken();
   } else {
     next.status = "failed";
     next.error = failureReason(s.LOG ?? "", exited ? exitCode : null);
@@ -286,12 +394,37 @@ function pollJob(job: SetupJob): { job: SetupJob; view: SetupView } {
 
 // ── what's needed ───────────────────────────────────────────────────────────
 
-/// Why OrcaSlicer must be installed (no binary, or no profiles), "config" when
-/// the user's own `orca_path` points nowhere (installing wouldn't help), or
-/// null when slicing is ready.
-function orcaNeed(): { kind: "missing" | "config"; reason: string } | null {
+// `ldd` the extracted install with the dirs its launcher (libexec/
+// orca-slicer-env) and slice.ts put on LD_LIBRARY_PATH.
+const LIBS_PROBE = `O="$HOME/.local/share/orca-slicer"
+[ -x "$O/bin/orca-slicer" ] && command -v ldd >/dev/null 2>&1 || exit 0
+LD_LIBRARY_PATH="$O/extra-lib:$O/lib/orca-runtime:$O/lib:$O/bin" ldd "$O/bin/orca-slicer" 2>/dev/null | awk '/not found/{print $1}' | sort -u
+true`;
+
+const LIBS_TTL_MS = 5 * 60_000;
+let libsMemo: { at: number; libs: string[] } | null = null;
+
+/// Shared libraries the extracted OrcaSlicer can't load (empty = fine, or not
+/// an extracted install).
+export function missingOrcaLibs(): string[] {
+  const now = Date.now();
+  if (libsMemo && now - libsMemo.at < LIBS_TTL_MS) return libsMemo.libs;
+  const libs = sh(LIBS_PROBE, [], 30).split("\n").map((s) => s.trim()).filter(Boolean);
+  libsMemo = { at: now, libs };
+  return libs;
+}
+
+/// Why OrcaSlicer must be installed (no binary, or no profiles), "libs" when
+/// the extracted install can't load some host libraries, "config" when the
+/// user's own `orca_path` points nowhere (installing wouldn't help), or null
+/// when slicing is ready.
+function orcaNeed(): { kind: "missing" | "libs" | "config"; reason: string } | null {
   const profiles = !!orcaProfilesDir() || detectRoots().some((r) => r.kind === "system");
   const bin = findOrca();
+  if (bin && bin.via !== "flatpak") {
+    const libs = missingOrcaLibs();
+    if (libs.length) return { kind: "libs", reason: `OrcaSlicer can't start: ${libs.join(", ")} ${libs.length === 1 ? "is" : "are"} missing on this host` };
+  }
   if (profiles && bin) return null;
   if (!bin && orcaPath() !== DEFAULT_ORCA_PATH) {
     return { kind: "config", reason: `the “OrcaSlicer executable” setting (${orcaPath()}) doesn't point at a program on this host` };
@@ -375,7 +508,9 @@ export function ensureSetup(force?: SetupName): SetupState {
     orca = { status: "failed", reason: oNeed.reason, error: `Slicing is unavailable: ${oNeed.reason}. Clear the setting to let Print Farm install OrcaSlicer itself.` };
   } else {
     const need = oNeed ? { kind: "missing" as const, reason: oNeed.reason } : null;
-    if (shouldStart(orcaJob, need, now, force === "orca")) orcaJob = startJob("orca", need!.reason);
+    if (shouldStart(orcaJob, need, now, force === "orca")) {
+      orcaJob = startJob("orca", need!.reason, oNeed!.kind === "libs" ? ORCA_LIBS_INSTALL : ORCA_INSTALL);
+    }
     orca = viewOf(orcaJob, need);
   }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { flattenProfile, parseScan, parseRoots, parseKind, isBambuMachine } from "../src/profiles";
+import { flattenProfile, parseScan, parseRoots, parseKind, isBambuMachine, makeCliCompatible, cliSystemName } from "../src/profiles";
 
 const DB: Record<string, Record<string, unknown>> = {
   "fdm_filament_common": { type: "filament", name: "fdm_filament_common", from: "system", instantiation: "false", nozzle_temperature: ["200"], filament_density: ["1.24"] },
@@ -13,7 +13,7 @@ const DB: Record<string, Record<string, unknown>> = {
 const lookup = (n: string) => DB[n] ?? null;
 
 describe("flattenProfile", () => {
-  it("merges the inherits chain root → leaf and drops inherits", () => {
+  it("merges the inherits chain root → leaf; a user preset inherits its nearest system preset", () => {
     const f = flattenProfile("My PLA", lookup);
     expect(f).toMatchObject({
       name: "My PLA",
@@ -22,10 +22,44 @@ describe("flattenProfile", () => {
       filament_density: ["1.24"], // from the root
       filament_vendor: ["Generic"],
       from: "User",
+      // The CLI's system name for a user preset; the base presets
+      // (instantiation false) are skipped.
+      inherits: "Generic PLA",
     });
-    expect("inherits" in f).toBe(false);
   });
 
+  it("keeps a system preset system, so the CLI matches it by its own name", () => {
+    const f = flattenProfile("Generic PLA", lookup);
+    expect(f).toMatchObject({ name: "Generic PLA", from: "system", instantiation: "true" });
+    expect("inherits" in f).toBe(false);
+    expect(cliSystemName(f)).toBe("Generic PLA");
+  });
+});
+
+describe("makeCliCompatible", () => {
+  const machine = { type: "machine", name: "Bambu Lab P1S 0.4 nozzle", from: "system" };
+
+  it("adds the printer's system name to a process list that lacks it, or is empty", () => {
+    const listed = { name: "0.20mm Standard @BBL X1C", compatible_printers: ["Bambu Lab P1S 0.4 nozzle"] };
+    expect(makeCliCompatible(machine, listed, {}).process.compatible_printers).toEqual(["Bambu Lab P1S 0.4 nozzle"]);
+    const other = { name: "p", compatible_printers: ["Bambu Lab X1 Carbon 0.4 nozzle"], compatible_printers_condition: "x" };
+    expect(makeCliCompatible(machine, other, {}).process).toMatchObject({
+      compatible_printers: ["Bambu Lab X1 Carbon 0.4 nozzle", "Bambu Lab P1S 0.4 nozzle"],
+      compatible_printers_condition: "",
+    });
+    // An empty list is NOT "any printer" for the CLI's process check.
+    expect(makeCliCompatible(machine, { name: "p", compatible_printers: [] }, {}).process.compatible_printers).toEqual(["Bambu Lab P1S 0.4 nozzle"]);
+  });
+
+  it("matches a user printer by the system preset it inherits; leaves an open filament list open", () => {
+    const user = { name: "My P1S", from: "User", inherits: "Bambu Lab P1S 0.4 nozzle" };
+    const r = makeCliCompatible(user, { name: "p" }, { name: "f", compatible_printers: [] });
+    expect(r.process.compatible_printers).toEqual(["Bambu Lab P1S 0.4 nozzle"]);
+    expect(r.filament.compatible_printers).toEqual([]);
+  });
+});
+
+describe("flattenProfile errors", () => {
   it("reports a missing leaf, a missing parent, and cycles", () => {
     expect(() => flattenProfile("nope", lookup)).toThrow(/profile 'nope' not found/);
     expect(() => flattenProfile("orphan", lookup)).toThrow(/parent profile 'missing parent' not found/);

@@ -48,6 +48,14 @@ describe("orca resolution", () => {
     ]);
   });
 
+  it("runs a non-flatpak OrcaSlicer with the fetched host libraries on LD_LIBRARY_PATH", () => {
+    const kv = "extralib=/h/.local/share/orca-slicer/extra-lib\npath=\nlocal=/h/.local/bin/orca-slicer\nflatpak=com.orcaslicer.OrcaSlicer";
+    expect(resolveOrca("orca-slicer", parseKv(kv), S)?.argv).toEqual([
+      "env", "LD_LIBRARY_PATH=/h/.local/share/orca-slicer/extra-lib", "/h/.local/bin/orca-slicer",
+    ]);
+    expect(resolveOrca("orca-slicer", parseKv("extralib=/x\npath=\nflatpak=com.orcaslicer.OrcaSlicer"), S)?.argv[0]).toBe("flatpak");
+  });
+
   it("is null when nothing is found or a custom path is missing", () => {
     expect(resolveOrca("orca-slicer", parseKv("path="), S)).toBeNull();
     expect(resolveOrca("/opt/Orca.AppImage", parseKv("path=\nlocal=/h/.local/bin/orca-slicer"), S)).toBeNull();
@@ -70,11 +78,18 @@ describe("job polling", () => {
     expect(settle(parsePoll(poll("0", "0", ["result.gcode.3mf"])), "gcode.3mf")).toEqual({ status: "succeeded", output: "result.gcode.3mf" });
   });
 
-  it("fails with result.json's error, else the log tail", () => {
+  it("fails with result.json's error verbatim (plus Orca's code), else the log tail", () => {
     const withResult = parsePoll(poll("1", "0", ["result.json"], "x", '{"return_code": -5, "error_string": "Nothing to be sliced"}'));
-    expect(settle(withResult, "gcode")).toEqual({ status: "failed", error: "Nothing to be sliced" });
+    expect(settle(withResult, "gcode")).toEqual({ status: "failed", error: "Nothing to be sliced (OrcaSlicer error -5)" });
+    const compat = '{"return_code": 239, "error_string": "The selected printer is not compatible with the process preset in the 3mf."}';
+    expect(settle(parsePoll(poll("239", "0", ["result.json"], "", compat)), "gcode").error).toBe(
+      "The selected printer is not compatible with the process preset in the 3mf. (OrcaSlicer error 239)",
+    );
     const withLog = parsePoll(poll("134", "0", [], "loading...\nerror: profile mismatch\n"));
     expect(settle(withLog, "gcode").error).toMatch(/profile mismatch/);
+    // A "Success." result with no output file isn't the reason — the log is.
+    const ok = parsePoll(poll("0", "0", ["result.json"], "no plates\n", '{"return_code": 0, "error_string": "Success."}'));
+    expect(settle(ok, "gcode").error).toBe("no plates");
   });
 
   it("fails when the process died without an exit code", () => {

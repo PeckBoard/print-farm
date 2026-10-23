@@ -13,13 +13,20 @@
 // Bambu targets get `<out>/result.gcode.3mf` (G-code embedded). On a headless
 // host the run is wrapped in `xvfb-run -a` when no DISPLAY is set and
 // xvfb-run is installed (setting `orca_headless`).
+//
+// Before the run: the presets are flattened and paired the way the CLI
+// checks them (profiles.ts makeCliCompatible), a project 3MF is reduced to
+// its geometry (threemf.ts), and an extracted AppImage install gets
+// `LD_LIBRARY_PATH=<install>/extra-lib` — where setup.ts drops the host
+// libraries it fetched rootless (the binary's RUNPATH is a CI build dir).
 
 import { storeGet, storePut, storeList } from "./host";
 import { nextSeq } from "./counter";
 import { orcaPath, orcaHeadless, DEFAULT_ORCA_PATH } from "./config";
 import { sh, storageDir, requireFile, newFileRecord, putFile, headTail, FileRecord, writeText, JOB_HEARTBEAT, JOB_ALIVE } from "./storage";
 import { parseGcodeEstimate, GcodeEstimate } from "./gcode";
-import { resolveProfile, isBambuMachine } from "./profiles";
+import { resolveProfile, isBambuMachine, makeCliCompatible } from "./profiles";
+import { sliceableModel } from "./threemf";
 import { getPrinter } from "./printers";
 
 export type SliceTarget = "gcode" | "gcode.3mf";
@@ -84,11 +91,16 @@ export interface OrcaResolution {
 /// The configured command wins when it resolves; only the default
 /// `orca-slicer` falls back to ~/.local/bin (App Manager's AppImage wrapper,
 /// often missing from Peckboard's PATH), then flatpak. The flatpak sandbox
-/// gets the storage dir (models + job dirs) mounted read-write.
+/// gets the storage dir (models + job dirs) mounted read-write. Any other
+/// launch of the extracted AppImage install runs under
+/// `env LD_LIBRARY_PATH=<install>/extra-lib` (where setup.ts puts the host
+/// libraries it fetched), so it works with an old wrapper, a bare AppRun
+/// `orca_path`, or no wrapper at all.
 export function resolveOrca(setting: string, probe: Record<string, string>, storage: string): OrcaResolution | null {
-  if (probe.path) return { argv: [setting], resolved: probe.path, via: "path" };
+  const withLibs = (argv: string[]) => (probe.extralib ? ["env", `LD_LIBRARY_PATH=${probe.extralib}`, ...argv] : argv);
+  if (probe.path) return { argv: withLibs([setting]), resolved: probe.path, via: "path" };
   if (setting !== DEFAULT_ORCA_PATH) return null;
-  if (probe.local) return { argv: [probe.local], resolved: probe.local, via: "local" };
+  if (probe.local) return { argv: withLibs([probe.local]), resolved: probe.local, via: "local" };
   if (probe.flatpak) {
     return { argv: ["flatpak", "run", `--filesystem=${storage}`, probe.flatpak], resolved: `flatpak run ${probe.flatpak}`, via: "flatpak" };
   }
@@ -107,6 +119,7 @@ export function parseKv(out: string): Record<string, string> {
 
 // $1 = configured command, $2 = 1 to probe the default's fallbacks.
 const ORCA_PROBE = [
+  'o="$HOME/.local/share/orca-slicer"; [ -e "$o/AppRun" ] && echo "extralib=$o/extra-lib"',
   'o=$1; p=$(command -v "$o" 2>/dev/null); echo "path=$p"',
   'if [ -z "$p" ] && [ "$2" = 1 ]; then',
   '  l="$HOME/.local/bin/orca-slicer"; [ -x "$l" ] && echo "local=$l"',
@@ -177,12 +190,16 @@ export function settle(p: PollResult, target: SliceTarget): { status: SliceJob["
     return { status: "failed", error: "OrcaSlicer exited without reporting a result (crashed or killed)" };
   }
   const want = target === "gcode.3mf" ? RESULT_3MF : p.outFiles.find((f) => /^plate_\d+\.gcode$/.test(f)) ?? "";
-  const rjErr = p.resultJson && (p.resultJson.error_string || p.resultJson.message);
   if (p.exitCode === 0 && want && p.outFiles.includes(want)) return { status: "succeeded", output: want };
+  // OrcaSlicer's own reason, verbatim (out/result.json: return_code + error_string).
+  const rj = p.resultJson;
+  const rjErr = rj && (rj.error_string || rj.message) && !/^success\.?$/i.test(String(rj.error_string ?? "").trim())
+    ? String(rj.error_string || rj.message).trim() + (rj.return_code ? ` (OrcaSlicer error ${rj.return_code})` : "")
+    : "";
   const lastLog = p.logTail.trim().split("\n").filter(Boolean).slice(-3).join(" | ");
   return {
     status: "failed",
-    error: String(rjErr || lastLog || `OrcaSlicer exited with code ${p.exitCode} and produced no output`),
+    error: rjErr || lastLog || `OrcaSlicer exited with code ${p.exitCode} and produced no output`,
   };
 }
 
@@ -263,13 +280,15 @@ export function startSlice(req: SliceRequest): SliceJob {
   const id = "j" + nextSeq("slice_seq");
   const dir = `${storageDir()}/jobs/${id}`;
   sh('mkdir -p "$1/out"', [dir]);
-  writeText(`${dir}/printer.json`, JSON.stringify(machine.profile, null, 2));
-  writeText(`${dir}/process.json`, JSON.stringify(process.profile, null, 2));
-  writeText(`${dir}/filament.json`, JSON.stringify(filament.profile, null, 2));
+  const presets = makeCliCompatible(machine.profile, process.profile, filament.profile);
+  writeText(`${dir}/printer.json`, JSON.stringify(presets.machine, null, 2));
+  writeText(`${dir}/process.json`, JSON.stringify(presets.process, null, 2));
+  writeText(`${dir}/filament.json`, JSON.stringify(presets.filament, null, 2));
+  const modelPath = sliceableModel(model.path, `${dir}/model.3mf`).path;
 
   const command = [
     ...headlessPrefix(),
-    ...buildOrcaArgs({ orca: findOrca()?.argv ?? orcaPath(), modelPath: model.path, jobDir: dir, target, arrange: req.arrange, orient: req.orient }),
+    ...buildOrcaArgs({ orca: findOrca()?.argv ?? orcaPath(), modelPath, jobDir: dir, target, arrange: req.arrange, orient: req.orient }),
   ];
   const pid = Number(sh(LAUNCH, [dir, ...command], 30).trim());
   const job: SliceJob = {
