@@ -13,5 +13,5 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src/**/*", "test/**/*"],
-  "exclude": ["test/shell.test.ts", "test/setup-shell.test.ts", "test/strip3mf.test.ts", "test/sliceinfo-shell.test.ts"]
+  "exclude": ["test/shell.test.ts", "test/setup-shell.test.ts", "test/strip3mf.test.ts", "test/sliceinfo-shell.test.ts", "test/captures-shell.test.ts"]
 }

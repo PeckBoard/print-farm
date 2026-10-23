@@ -26,7 +26,7 @@ import { PrinterRecord, DEVELOPER_MODE_HINT } from "./drivers/types";
 import { ensureSetupQuiet, SetupView } from "./setup";
 import { withSpools } from "./spools";
 import { runControl, parseControl, guardControl, describeAction, validRemoteName, remoteFiles } from "./control";
-import { takeCapture, publicCapture } from "./captures";
+import { takeCapture, publicCapture, listCaptures, requireCapture, readImageB64 } from "./captures";
 
 /// A one-line note for an agent while an automatic install runs/failed.
 function setupNote(what: string, v: SetupView | null | undefined): string | null {
@@ -194,7 +194,7 @@ export function printSnapshot(args: any): unknown {
   putFile(saved);
   const out: Record<string, unknown> = { printer: p.id, camera: true, content_type: snap.content_type, file_id: saved.id, size };
   if (args.include_data === true) out.data_base64 = snap.data_base64;
-  return out;
+  return { ...out, ...image(snap.data_base64, snap.content_type) };
 }
 
 // ── printer controls ────────────────────────────────────────────────────────────
@@ -381,10 +381,44 @@ export function fileList(): unknown {
   return { files: listFiles().map(({ path: _p, ...rest }) => rest) };
 }
 
+/// Core turns `_image_base64` / `_image_mime` into an MCP image block, so a
+/// vision model sees the picture itself rather than a base64 string.
+function image(data_base64: string, content_type: string) {
+  return { _image_base64: data_base64, _image_mime: content_type || "image/jpeg" };
+}
+
 export function cameraCapture(args: any): unknown {
   const p = resolvePrinter(args.printer);
   const { capture, data_base64 } = takeCapture(p);
-  return { printer: p.id, capture: publicCapture(capture), content_type: capture.content_type, data_base64 };
+  return { printer: p.id, capture: publicCapture(capture), content_type: capture.content_type, ...image(data_base64, capture.content_type) };
+}
+
+export function captureList(args: any): unknown {
+  const printer = s(args.printer) ? resolvePrinter(args.printer).id : undefined;
+  const all = listCaptures(printer);
+  return { total: all.length, captures: all.slice(0, 100).map(publicCapture), truncated: all.length > 100 };
+}
+
+/// Show a kept capture (or an image file, e.g. a print_snapshot) to the agent.
+/// No id: the printer's newest capture.
+export function captureView(args: any): unknown {
+  if (s(args.file_id)) {
+    const f = requireFile(s(args.file_id));
+    if (f.kind !== "image") throw new Error(`file ${f.id} is not an image (${f.kind})`);
+    const r = readImageB64(f.path);
+    const type = /\.png$/i.test(f.name) ? "image/png" : "image/jpeg";
+    return { file_id: f.id, name: f.name, size: r.size, content_type: type, ...image(r.data_base64, type) };
+  }
+  let c;
+  if (s(args.capture_id)) c = requireCapture(s(args.capture_id));
+  else {
+    if (!s(args.printer)) throw new Error("pass capture_id, file_id, or printer (for its newest capture)");
+    const p = resolvePrinter(args.printer);
+    c = listCaptures(p.id)[0];
+    if (!c) throw new Error(`${p.name} has no captures yet; take one with camera_capture`);
+  }
+  const r = readImageB64(c.path);
+  return { capture: publicCapture(c), content_type: c.content_type, ...image(r.data_base64, c.content_type) };
 }
 
 export const TOOLS: Record<string, (args: any) => unknown> = {
@@ -413,4 +447,6 @@ export const TOOLS: Record<string, (args: any) => unknown> = {
   file_list: fileList,
   file_delete: fileDelete,
   camera_capture: cameraCapture,
+  capture_list: captureList,
+  capture_view: captureView,
 };

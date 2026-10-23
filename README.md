@@ -220,7 +220,15 @@ writes light / dark / phone screenshots.
 → job, `slice_status {job_id}`, `print_upload {printer, file_id}`,
 `print_start` (two-phase, below), `print_control {printer, action: pause|cancel}`
 (resume is UI-only), `print_snapshot {printer, include_data?}` (saves a file;
-base64 only on request).
+base64 text only on request).
+
+Camera images reach the agent as real MCP image blocks (the tool returns
+`_image_base64` / `_image_mime`, which core turns into `{type: "image"}`), so a
+vision model sees the picture: `print_snapshot`, `camera_capture {printer}`
+(keeps it in the capture gallery), `capture_list {printer?}`, and
+`capture_view {capture_id | file_id | printer}` (a kept capture — including
+ones the user took on the page — an image file, or a printer's newest
+capture; up to 4 MiB).
 
 ## Print Confirmation
 

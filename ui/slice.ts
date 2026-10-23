@@ -6,7 +6,7 @@ import { h, clear, icon, btn, toast, errText, confirmDialog, select, field } fro
 import { get, post, del, bytesToB64, b64ToBytes, openPluginPage } from "./api";
 import { state, FileRec, SliceJob, Print, Printer, Diagnostics, Status, SpoolInfo, printerById, loadPrinters, SETUP_DONE, SETUP_CHANGED, orcaSetupMessage } from "./state";
 import { fmtBytes, fmtDuration, fmtFilament, accepts, previewKind, TYPE_SHORT } from "./format";
-import { parseGcode, ParsedGcode } from "./gcode";
+import { parseGcodeAsync, ParsedGcode, EMPTY_GCODE } from "./gcode";
 import { Viewer, ViewerTheme, webglAvailable } from "./viewer";
 import { profilePicker, ProfilePicker } from "./profilePicker";
 import { unzipSync } from "three/examples/jsm/libs/fflate.module.js";
@@ -349,6 +349,11 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       viewer = new Viewer(viewerHost, viewerTheme());
       viewerHost.insertBefore(viewerHost.lastChild!, overlay); // keep canvas under the overlay
       viewerHost.appendChild(overlay);
+      if (viewer.software) {
+        viewerHost.appendChild(
+          h("div", { class: "gpu", role: "note", text: "Software rendering: turn on hardware acceleration in your browser settings for a smooth preview." }),
+        );
+      }
     } catch (_e) {
       viewer = null;
     }
@@ -390,13 +395,13 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     previewTitle.textContent = f ? f.name : "Preview";
     if (!f) {
       setOverlay([icon("box"), h("span", { text: state.files.length ? "Pick a file to preview it." : "Upload a model to preview and slice it." })]);
-      viewer?.showGcode({ layers: [], bounds: null, moves: 0 });
+      viewer?.showGcode(EMPTY_GCODE);
       return;
     }
     const kind = previewKind(f.name, f.kind);
     if (!kind) {
       setOverlay([icon("box"), h("span", { text: f.kind === "bgcode" ? "Binary G-code can't be previewed." : "No 3D preview for this format (STEP / OBJ / AMF) — it can still be sliced." })]);
-      viewer?.showGcode({ layers: [], bounds: null, moves: 0 });
+      viewer?.showGcode(EMPTY_GCODE);
       return;
     }
     if (!f.complete) {
@@ -451,8 +456,11 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
           if (!name) throw new Error("no G-code inside this .gcode.3mf");
           text = new TextDecoder().decode(files[name]);
         } else text = new TextDecoder().decode(bytes);
-        const parsed = parseGcode(text);
-        if (token !== loadToken) return;
+        // Parsed in slices so a big file never freezes the page.
+        const bar = prog.firstChild as HTMLElement;
+        bar.style.width = "0%";
+        const parsed = await parseGcodeAsync(text, (p) => (bar.style.width = Math.round(p * 100) + "%"), () => token !== loadToken);
+        if (!parsed || token !== loadToken) return;
         if (!parsed.layers.length) {
           setOverlay([icon("warn"), h("span", { text: "No extrusion moves found in this G-code." })]);
           return;

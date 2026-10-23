@@ -75,6 +75,23 @@ export function readCapture(c: Capture, offset = 0, length = MAX_READ) {
   return { capture: publicCapture(c), content_type: c.content_type, offset, length: got, size: r.size, eof: offset + got >= r.size, data_base64: r.data_base64 };
 }
 
+/// Largest image handed to an agent: vision APIs reject much past ~5 MB.
+export const MAX_VIEW_BYTES = 4 * 1024 * 1024;
+
+/// A whole stored image as base64, for an MCP image block. MAX_READ is a
+/// multiple of 3, so the chunks' base64 concatenates without padding.
+export function readImageB64(path: string): { size: number; data_base64: string } {
+  let off = 0;
+  let out = "";
+  for (;;) {
+    const r = readB64(path, off, MAX_READ);
+    if (off === 0 && r.size > MAX_VIEW_BYTES) throw new DriverError(413, `image is ${r.size} bytes; agents can view up to ${MAX_VIEW_BYTES}`);
+    out += r.data_base64;
+    off += MAX_READ;
+    if (off >= r.size || !r.data_base64) return { size: r.size, data_base64: out };
+  }
+}
+
 export function deleteCapture(id: string): void {
   const c = requireCapture(id);
   removePath(c.path);

@@ -190,8 +190,8 @@ const MCP_TOOLS = [
   {
     name: "print_snapshot",
     description:
-      "Grab a camera frame from a printer. Saves it as a file (file_id) and returns its size; set " +
-      "include_data to also get the image as base64. camera:false when the printer has no camera.",
+      "Grab a live camera frame from a printer and show it to you as an image. Also saves it as a file (file_id); set " +
+      "include_data to also get it as base64 text. camera:false when the printer has no camera.",
     input_schema: {
       type: "object",
       properties: {
@@ -337,9 +337,34 @@ const MCP_TOOLS = [
   {
     name: "camera_capture",
     description:
-      "Take a camera still and keep it in the printer's capture gallery (Print Farm page). Returns the capture id " +
-      "and the image (content_type + data_base64).",
+      "Take a camera still, keep it in the printer's capture gallery (Print Farm page) and show it to you as an image. " +
+      "Returns the capture id.",
     input_schema: printerOnly(),
+  },
+  {
+    name: "capture_list",
+    description: "Kept camera captures (id, printer, taken_at UTC, size), newest first; printer filters. View one with capture_view.",
+    input_schema: {
+      type: "object",
+      properties: { printer: { type: "string", description: PRINTER_REF } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "capture_view",
+    description:
+      "Look at a kept camera capture (capture_id from capture_list / camera_capture — includes stills the user took on " +
+      "the Print Farm page), an image file (file_id, e.g. from print_snapshot), or a printer's newest capture (printer). " +
+      "Returns the picture as an image.",
+    input_schema: {
+      type: "object",
+      properties: {
+        capture_id: { type: "string" },
+        file_id: { type: "string" },
+        printer: { type: "string", description: PRINTER_REF },
+      },
+      additionalProperties: false,
+    },
   },
 ];
 

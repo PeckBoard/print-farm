@@ -33,7 +33,7 @@ describe("manifest", () => {
     // Every handler is declared, and nothing declared lacks a handler.
     expect(m.mcp_tools.map((t: any) => t.name).sort()).toEqual(Object.keys(TOOLS).sort());
     expect(Object.keys(TOOLS)).toEqual(
-      expect.arrayContaining(["print_start", "printer_move", "printer_gcode", "printer_file_delete", "file_delete", "camera_capture"]),
+      expect.arrayContaining(["print_start", "printer_move", "printer_gcode", "printer_file_delete", "file_delete", "camera_capture", "capture_list", "capture_view"]),
     );
     expect(m.permissions).toEqual(expect.arrayContaining(["http_request", "process_exec_any", "ask_user", "data_store"]));
   });

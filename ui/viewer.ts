@@ -13,7 +13,7 @@ import {
   Mesh,
   MeshStandardMaterial,
   BufferGeometry,
-  Float32BufferAttribute,
+  BufferAttribute,
   LineSegments,
   LineBasicMaterial,
   Group,
@@ -24,7 +24,6 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-import { BufferAttribute } from "three";
 import type { Parsed3mf } from "./threemf";
 import type { ParsedGcode } from "./gcode";
 
@@ -47,26 +46,36 @@ export class Viewer {
   private grid: GridHelper | null = null;
   private ro: ResizeObserver;
   private raf = 0;
+  private frames = 0;
   private gcode: {
     parsed: ParsedGcode;
-    group: Group;
-    lines: LineSegments[];
-    travel: LineSegments[];
-    exMat: LineBasicMaterial;
-    topMat: LineBasicMaterial;
+    below: LineSegments;
+    top: LineSegments;
+    travel: LineSegments;
   } | null = null;
+  /// WebGL is running on the CPU (see webglInfo).
+  readonly software: boolean;
   private showTravel = false;
   private bed = 220;
 
   constructor(private host: HTMLElement, private theme: ViewerTheme) {
-    this.renderer = new WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
-    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    const info = webglInfo();
+    this.software = !!info?.software;
+    // Ask for the discrete GPU, and don't keep a copy of every frame
+    // (preserveDrawingBuffer forces a full-canvas copy per render). On a
+    // CPU (software) renderer drop MSAA and render at 1x: it's the pixel
+    // count that makes software WebGL crawl.
+    this.renderer = new WebGLRenderer({ antialias: !this.software, alpha: false, powerPreference: "high-performance" });
+    this.renderer.setPixelRatio(this.software ? 1 : Math.min(2, window.devicePixelRatio || 1));
     host.appendChild(this.renderer.domElement);
     this.renderer.domElement.setAttribute("aria-hidden", "true");
     // Z-up like a printer.
     this.camera.up.set(0, 0, 1);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    // Default 0.05 keeps the camera drifting (and rendering) for seconds
+    // after a drag; 0.15 settles in well under one.
+    this.controls.dampingFactor = 0.15;
     this.controls.addEventListener("change", () => this.kick());
     this.scene.add(new HemisphereLight(0xffffff, 0x444444, 1.4));
     this.scene.add(new AmbientLight(0xffffff, 0.35));
@@ -108,16 +117,16 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
     this.kick();
   }
-
-  /// Render on demand (damping needs a few frames after input).
+  /// Render on demand. One loop at most: input during a frame (OrbitControls
+  /// fires "change" from update()) only extends it, and damping keeps it
+  /// running exactly while the camera still moves.
   private kick() {
+    this.frames = 2;
     if (this.raf) return;
-    let frames = 30;
     const loop = () => {
-      this.raf = 0;
       const moved = this.controls.update();
       this.renderer.render(this.scene, this.camera);
-      if (moved || --frames > 0) this.raf = requestAnimationFrame(loop);
+      this.raf = moved || --this.frames > 0 ? requestAnimationFrame(loop) : 0;
     };
     this.raf = requestAnimationFrame(loop);
   }
@@ -171,26 +180,25 @@ export class Viewer {
 
   showGcode(parsed: ParsedGcode) {
     this.clear();
+    // One GPU buffer per kind; "layers 0..n" is a draw range, so the whole
+    // print is three draw calls however many layers it has. `below` and
+    // `top` share the extrusion buffer (uploaded once).
+    const exAttr = new BufferAttribute(parsed.extrude, 3);
+    const belowGeo = new BufferGeometry();
+    belowGeo.setAttribute("position", exAttr);
+    const topGeo = new BufferGeometry();
+    topGeo.setAttribute("position", exAttr);
+    const travelGeo = new BufferGeometry();
+    travelGeo.setAttribute("position", new BufferAttribute(parsed.travel, 3));
+    const below = new LineSegments(belowGeo, new LineBasicMaterial({ color: new Color(this.theme.extrude) }));
+    const top = new LineSegments(topGeo, new LineBasicMaterial({ color: new Color(this.theme.extrudeTop) }));
+    const travel = new LineSegments(travelGeo, new LineBasicMaterial({ color: new Color(this.theme.travel), transparent: true, opacity: 0.55 }));
+    // Draw ranges change what's visible; skip per-frame bounds checks.
+    for (const l of [below, top, travel]) l.frustumCulled = false;
     const group = new Group();
-    const lines: LineSegments[] = [];
-    const travel: LineSegments[] = [];
-    const exMat = new LineBasicMaterial({ color: new Color(this.theme.extrude) });
-    const trMat = new LineBasicMaterial({ color: new Color(this.theme.travel), transparent: true, opacity: 0.55 });
-    for (const layer of parsed.layers) {
-      const eg = new BufferGeometry();
-      eg.setAttribute("position", new Float32BufferAttribute(layer.extrude, 3));
-      const el = new LineSegments(eg, exMat);
-      group.add(el);
-      lines.push(el);
-      const tg = new BufferGeometry();
-      tg.setAttribute("position", new Float32BufferAttribute(layer.travel, 3));
-      const tl = new LineSegments(tg, trMat);
-      tl.visible = false;
-      group.add(tl);
-      travel.push(tl);
-    }
+    group.add(below, top, travel);
     this.content.add(group);
-    this.gcode = { parsed, group, lines, travel, exMat, topMat: new LineBasicMaterial({ color: new Color(this.theme.extrudeTop) }) };
+    this.gcode = { parsed, below, top, travel };
     const b = parsed.bounds;
     const plate = b ? Math.max(220, Math.ceil(Math.max(b.max[0], b.max[1]) / 10) * 10) : 220;
     this.bed = plate;
@@ -203,11 +211,17 @@ export class Viewer {
   setLayer(n: number) {
     const g = this.gcode;
     if (!g) return;
-    g.lines.forEach((l, i) => {
-      l.visible = i <= n;
-      l.material = i === n ? g.topMat : g.exMat;
-    });
-    g.travel.forEach((l, i) => (l.visible = this.showTravel && i === n));
+    const L = g.parsed.layers[n];
+    if (!L) {
+      g.below.geometry.setDrawRange(0, 0);
+      g.top.geometry.setDrawRange(0, 0);
+      g.travel.geometry.setDrawRange(0, 0);
+    } else {
+      g.below.geometry.setDrawRange(0, L.e0 / 3);
+      g.top.geometry.setDrawRange(L.e0 / 3, (L.e1 - L.e0) / 3);
+      g.travel.geometry.setDrawRange(L.t0 / 3, (L.t1 - L.t0) / 3);
+    }
+    g.travel.visible = this.showTravel;
     this.kick();
   }
 
@@ -217,7 +231,8 @@ export class Viewer {
   }
 
   fit() {
-    const box = new Box3().setFromObject(this.content);
+    const b = this.gcode?.parsed.bounds;
+    const box = b ? new Box3(new Vector3(...b.min), new Vector3(...b.max)) : new Box3().setFromObject(this.content);
     if (box.isEmpty()) {
       box.set(new Vector3(0, 0, 0), new Vector3(this.bed, this.bed, 10));
     }
@@ -236,6 +251,7 @@ export class Viewer {
 
   dispose() {
     cancelAnimationFrame(this.raf);
+    this.raf = 0;
     this.ro.disconnect();
     this.clear();
     this.controls.dispose();
@@ -254,11 +270,35 @@ function disposeTree(o: Object3D) {
   });
 }
 
-export function webglAvailable(): boolean {
+export interface WebglInfo {
+  /// The GPU string, when the browser exposes it.
+  renderer: string;
+  /// True when WebGL runs on the CPU (SwiftShader / llvmpipe / WARP): the
+  /// browser's hardware acceleration is off or the GPU is blocklisted.
+  software: boolean;
+}
+
+let probed: WebglInfo | null | undefined;
+
+/// Probe WebGL once (asking for the discrete GPU), then free the context.
+export function webglInfo(): WebglInfo | null {
+  if (probed !== undefined) return probed;
+  probed = null;
   try {
     const c = document.createElement("canvas");
-    return !!(c.getContext("webgl2") || c.getContext("webgl"));
+    const opts = { powerPreference: "high-performance" as const };
+    const gl = (c.getContext("webgl2", opts) || c.getContext("webgl", opts)) as WebGLRenderingContext | null;
+    if (!gl) return probed;
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+    const renderer = String((dbg && gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) || gl.getParameter(gl.RENDERER) || "");
+    probed = { renderer, software: /swiftshader|llvmpipe|softpipe|software|basic render|warp/i.test(renderer) };
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
   } catch (_e) {
-    return false;
+    probed = null;
   }
+  return probed;
+}
+
+export function webglAvailable(): boolean {
+  return webglInfo() !== null;
 }

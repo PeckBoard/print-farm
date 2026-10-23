@@ -239,6 +239,7 @@ const CSS = `
   select.plate-sel { height: 26px; width: auto; font-size: 12px; padding: 0 8px; }
   .viewer .tools { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; }
   .viewer .hint { position: absolute; left: 10px; bottom: 8px; font-size: 11px; color: var(--text3); pointer-events: none; }
+  .viewer .gpu { position: absolute; left: 10px; top: 8px; right: 10px; font-size: 11px; color: var(--warn); pointer-events: none; }
   .layerbar { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
   .layerbar input[type=range] { flex: 1; min-width: 160px; accent-color: var(--accent); }
   .layerbar .lbl { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text2); min-width: 150px; }
