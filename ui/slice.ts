@@ -4,12 +4,13 @@
 
 import { h, clear, icon, btn, toast, errText, confirmDialog, select, field } from "./dom";
 import { get, post, del, bytesToB64, b64ToBytes, openPluginPage } from "./api";
-import { state, FileRec, SliceJob, Print, Printer, Diagnostics, Status, printerById, loadPrinters, SETUP_DONE, SETUP_CHANGED } from "./state";
+import { state, FileRec, SliceJob, Print, Printer, Diagnostics, Status, printerById, loadPrinters, SETUP_DONE, SETUP_CHANGED, orcaSetupMessage } from "./state";
 import { fmtBytes, fmtDuration, fmtFilament, accepts, previewKind, TYPE_SHORT } from "./format";
 import { parseGcode, ParsedGcode } from "./gcode";
 import { Viewer, ViewerTheme, webglAvailable } from "./viewer";
 import { profilePicker, ProfilePicker } from "./profilePicker";
 import { unzipSync } from "three/examples/jsm/libs/fflate.module.js";
+import { parse3mf, plateThumbnail, Parsed3mf } from "./threemf";
 
 const CHUNK_RAW = 768 * 1024; // → exactly 1 MiB of base64 per request
 const READ_LEN = 786432;
@@ -102,41 +103,20 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     renderBanner();
   }
 
+  /// Slicer setup states (missing OrcaSlicer, missing profiles, installing,
+  /// failed) all live in the page-wide setup banner; this only flags a
+  /// headless host without xvfb-run.
   function renderBanner() {
     clear(banner);
     const d = state.diagnostics;
-    if (!d) return;
-    // An automatic install is running or failed: the page-wide setup banner
-    // already says so (and the slicer arrives without a click).
-    if (state.setup && state.setup.orca.status !== "ok") return;
-    const am = (q: string) => {
+    if (!d || !d.orca.orca_found || orcaSetupMessage()) return;
+    if (!d.orca.display && !d.orca.xvfb_run && d.orca.headless_mode !== "never") {
+      const q = "install=xvfb&from=print-farm";
       const a = h("a", { class: "btn sm", href: "/plugin-page/app-manager/app-manager?" + q }, icon("ext"), "Open App Manager");
       a.addEventListener("click", (e) => {
         e.preventDefault();
         openPluginPage("app-manager", "app-manager", q);
       });
-      return a;
-    };
-    if (!d.orca.orca_found) {
-      banner.appendChild(
-        h(
-          "div",
-          { class: "banner warn", role: "status" },
-          icon("warn"),
-          h(
-            "div",
-            { class: "grow" },
-            h("b", { text: "OrcaSlicer isn't installed — slicing is unavailable" }),
-            h("p", {
-              text:
-                `“${d.orca.orca_path}” wasn't found on this host (also checked ~/.local/bin and flatpak). Install OrcaSlicer (the AppImage works), or point the “OrcaSlicer executable” plugin setting at it. ` +
-                "You can still upload G-code and send it to printers.",
-            }),
-            h("div", { class: "row" }, am("install=orca-slicer,xvfb&from=print-farm")),
-          ),
-        ),
-      );
-    } else if (!d.orca.display && !d.orca.xvfb_run && d.orca.headless_mode !== "never") {
       banner.appendChild(
         h(
           "div",
@@ -147,28 +127,16 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
             { class: "grow" },
             h("b", { text: "No display and no xvfb-run" }),
             h("p", { text: "Some OrcaSlicer builds refuse to start without a display. Install xvfb (provides xvfb-run) so Print Farm can slice headless." }),
-            h("div", { class: "row" }, am("install=xvfb&from=print-farm")),
-          ),
-        ),
-      );
-    }
-    if (d.orca.orca_found && !d.profile_roots.length) {
-      banner.appendChild(
-        h(
-          "div",
-          { class: "banner warn", role: "status" },
-          icon("warn"),
-          h(
-            "div",
-            { class: "grow" },
-            h("b", { text: "No OrcaSlicer profiles found" }),
-            h("p", { text: "Open OrcaSlicer once (it writes ~/.config/OrcaSlicer/system), or set “OrcaSlicer profile directories” in the plugin settings." }),
+            h("div", { class: "row" }, a),
           ),
         ),
       );
     }
   }
-  window.addEventListener(SETUP_CHANGED, () => renderBanner());
+  window.addEventListener(SETUP_CHANGED, () => {
+    renderBanner();
+    pickerChanged();
+  });
   window.addEventListener(SETUP_DONE, () => {
     loadDiagnostics().then(() => renderActions());
   });
@@ -458,8 +426,23 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
         v.showStl(buf);
         modelTools(v);
       } else if (kind === "3mf") {
-        v.show3mf(buf);
+        const files = unzipSync(bytes);
+        // The project's plate thumbnail is instant; meshes take a moment.
+        const thumb = plateThumbnail(files, 1);
+        if (thumb) {
+          const url = URL.createObjectURL(new Blob([thumb as Uint8Array<ArrayBuffer>], { type: "image/png" }));
+          const img = h("img", { class: "thumb", src: url, alt: "Plate 1 thumbnail" }) as HTMLImageElement;
+          img.onload = img.onerror = () => URL.revokeObjectURL(url);
+          setOverlay([img, label]);
+          await new Promise((r) => setTimeout(r, 30));
+          if (token !== loadToken) return;
+        }
+        const parsed = parse3mf(files);
+        if (token !== loadToken) return;
+        const first = parsed.plates.length > 1 ? parsed.plates[0] : null;
+        v.show3mf(parsed, first);
         modelTools(v);
+        plateTools(v, parsed, first);
       } else {
         let text: string;
         if (kind === "gcode.3mf") {
@@ -491,7 +474,21 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     viewerHost.appendChild(h("div", { class: "hint", text: "Drag to orbit · right-drag to pan · scroll to zoom" }));
   }
 
+  /// Plate picker for multi-plate projects (Bambu Studio / OrcaSlicer).
+  function plateTools(v: Viewer, parsed: Parsed3mf, current: number | null) {
+    if (parsed.plates.length < 2) return;
+    const count = (p: number) => parsed.objects.filter((o) => o.plate === p).length;
+    const opts = parsed.plates.map((p) => ({ value: String(p), label: `Plate ${p} (${count(p)} object${count(p) === 1 ? "" : "s"})` }));
+    opts.push({ value: "all", label: `All plates (${parsed.objects.length} objects)` });
+    const sel = select("pf-plate", opts, current === null ? "all" : String(current), (val) => {
+      v.show3mf(parsed, val === "all" ? null : Number(val));
+    });
+    sel.setAttribute("aria-label", "Plate");
+    sel.classList.add("plate-sel");
+    previewTools.prepend(sel);
+  }
   function gcodeTools(v: Viewer, g: ParsedGcode) {
+
     modelTools(v);
     const n = g.layers.length;
     const range = h("input", { type: "range", min: "1", max: String(n), value: String(n), step: "1", id: "pf-layer", "aria-label": "Layer" }) as HTMLInputElement;
@@ -524,6 +521,8 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
 
   // ── actions panel (slice form / send panel) ──────────────────────────
   let picker: ProfilePicker | null = null;
+  // The picker outlives re-rendered forms: it reports to the current one.
+  let pickerChanged = () => {};
   let pickerFor: string | null = null;
 
   function latestJob(fileId: string): SliceJob | undefined {
@@ -577,7 +576,17 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     body.append(formHost, jobHost);
 
     const printerOpts = [{ value: "", label: "No printer — just pick profiles" }].concat(state.printers.map((p) => ({ value: p.id, label: `${p.name} (${TYPE_SHORT[p.type] || p.type})` })));
-    const lastPrinter = job?.printer_id && printerById(job.printer_id) ? job.printer_id : state.printers.length === 1 ? state.printers[0].id : "";
+    // Preselect: the job's printer, else the only printer, else the only one
+    // with default profiles.
+    const withDefaults = state.printers.filter((p) => p.orca_printer_profile);
+    const lastPrinter =
+      job?.printer_id && printerById(job.printer_id)
+        ? job.printer_id
+        : state.printers.length === 1
+          ? state.printers[0].id
+          : withDefaults.length === 1
+            ? withDefaults[0].id
+            : "";
     const prSel = select("pf-slice-printer", printerOpts, lastPrinter);
     const init = (pid: string) => {
       const p = printerById(pid);
@@ -589,8 +598,11 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       };
     };
     if (!picker || pickerFor !== f.id) {
-      picker = profilePicker("pf-slice", init(lastPrinter), { onChange: () => validate() });
+      picker = profilePicker("pf-slice", init(lastPrinter), { onChange: () => pickerChanged() });
       pickerFor = f.id;
+    } else if (lastPrinter && !picker.values().printer) {
+      // Printers loaded after the picker was built: take their defaults now.
+      picker.set(init(lastPrinter));
     }
     const pk = picker;
     prSel.addEventListener("change", () => {
@@ -612,7 +624,9 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
     function validate() {
       let why = "";
       const v = pk.values();
-      if (state.diagnostics && !state.diagnostics.orca.orca_found) why = "OrcaSlicer isn't installed on this host.";
+      const setupMsg = orcaSetupMessage();
+      if (setupMsg) why = setupMsg;
+      else if (state.diagnostics && !state.diagnostics.orca.orca_found) why = "OrcaSlicer isn't available on this host.";
       else if (pk.unavailable()) why = pk.unavailable()!;
       else if (!v.printer) why = "Pick a printer profile.";
       else if (!v.filament) why = "Pick a filament profile.";
@@ -623,6 +637,7 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       sliceBtn.disabled = !!why;
       reason.textContent = why;
     }
+    pickerChanged = validate;
     validate();
 
     sliceBtn.onclick = async () => {

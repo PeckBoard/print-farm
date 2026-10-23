@@ -2,7 +2,7 @@
 // GET profiles. Used by the printer form (defaults) and the slice form.
 
 import { h, combobox, field, select, Combo } from "./dom";
-import { loadVendors, loadProfiles, SETUP_DONE } from "./state";
+import { loadVendors, loadProfiles, SETUP_DONE, SETUP_CHANGED, orcaSetupMessage } from "./state";
 
 export interface ProfileValues {
   vendor: string;
@@ -75,23 +75,26 @@ export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>,
     opts.onChange?.();
   });
 
+  /// One message on every control when there's nothing to pick yet: the
+  /// automatic setup's state, or that no profiles exist (both rare once set up).
+  let loaded = false;
+  const paintEmpty = () => {
+    unavailable = orcaSetupMessage() ?? "No OrcaSlicer profiles found on this host.";
+    vendorSel.replaceChildren(h("option", { value: "", text: unavailable }));
+    vendorSel.disabled = true;
+    for (const k of Object.keys(combos)) combos[k].c.setDisabled(unavailable);
+    note.hidden = true;
+    opts.onChange?.();
+  };
   const load = (force: boolean) =>
     loadVendors(force)
       .then((vs) => {
         vendors = vs;
-        while (vendorSel.firstChild) vendorSel.removeChild(vendorSel.firstChild);
-        if (!vs.length) {
-          unavailable = "No OrcaSlicer profiles found on this host.";
-          vendorSel.appendChild(h("option", { value: "", text: "No profiles found" }));
-          for (const k of Object.keys(combos)) combos[k].c.setDisabled("No OrcaSlicer profiles found");
-          note.textContent = "Print Farm installs OrcaSlicer and its profiles automatically; they appear here as soon as that finishes.";
-          note.hidden = false;
-          opts.onChange?.();
-          return;
-        }
+        loaded = true;
+        if (!vs.length) return paintEmpty();
         unavailable = null;
         note.hidden = true;
-        for (const v of vs) vendorSel.appendChild(h("option", { value: v, text: v }));
+        vendorSel.replaceChildren(...vs.map((v) => h("option", { value: v, text: v })));
         if (!vendor || vs.indexOf(vendor) < 0) vendor = vs[0];
         vendorSel.value = vendor;
         vendorSel.disabled = false;
@@ -100,20 +103,26 @@ export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>,
       })
       .catch((e) => {
         unavailable = "Couldn't load profiles: " + (e as Error).message;
-        vendorSel.replaceChildren(h("option", { value: "", text: "Unavailable" }));
+        vendorSel.replaceChildren(h("option", { value: "", text: "Profiles unavailable" }));
         for (const k of Object.keys(combos)) combos[k].c.setDisabled("Profiles unavailable");
         note.textContent = unavailable;
         note.hidden = false;
         opts.onChange?.();
       });
   load(false);
-  // OrcaSlicer just finished installing: fill an empty picker in place.
-  const onSetupDone = () => {
-    if (!el.isConnected) window.removeEventListener(SETUP_DONE, onSetupDone);
-    else if (!vendors.length) load(true);
+  // Setup progressed: repaint the empty state, and fill the picker in place
+  // once OrcaSlicer is installed.
+  const onSetup = (e: Event) => {
+    if (!el.isConnected) {
+      window.removeEventListener(SETUP_DONE, onSetup);
+      window.removeEventListener(SETUP_CHANGED, onSetup);
+    } else if (loaded && !vendors.length) {
+      if (e.type === SETUP_DONE) load(true);
+      else paintEmpty();
+    }
   };
-  window.addEventListener(SETUP_DONE, onSetupDone);
-
+  window.addEventListener(SETUP_DONE, onSetup);
+  window.addEventListener(SETUP_CHANGED, onSetup);
   const el = h(
     "div",
     { class: "stack" },

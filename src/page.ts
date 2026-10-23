@@ -229,6 +229,8 @@ const CSS = `
   .viewer .overlay { position: absolute; inset: 0; display: grid; place-items: center; color: var(--text2); text-align: center; padding: 20px; pointer-events: none; }
   .viewer .overlay .box { pointer-events: auto; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 360px; }
   .viewer .overlay .box > svg.i { width: 28px; height: 28px; color: var(--text3); }
+  .viewer .overlay img.thumb { max-width: 100%; max-height: min(260px, 40vh); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+  select.plate-sel { height: 26px; width: auto; font-size: 12px; padding: 0 8px; }
   .viewer .tools { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; }
   .viewer .hint { position: absolute; left: 10px; bottom: 8px; font-size: 11px; color: var(--text3); pointer-events: none; }
   .layerbar { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }

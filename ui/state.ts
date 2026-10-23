@@ -144,6 +144,15 @@ export const SETUP_DONE = "pf-setup-done";
 /// Fired on window whenever the setup state was (re)loaded.
 export const SETUP_CHANGED = "pf-setup-changed";
 
+/// Why slicing / profile picking waits on the automatic OrcaSlicer setup, or
+/// null when it's done. One wording for every surface (picker, Slice button).
+export function orcaSetupMessage(): string | null {
+  const s = state.setup?.orca;
+  if (s?.status === "running") return "Setting up OrcaSlicer…";
+  if (s?.status === "failed") return "OrcaSlicer setup failed — see Retry above.";
+  return null;
+}
+
 let vendorsP: Promise<string[]> | null = null;
 const profileCache = new Map<string, Promise<string[]>>();
 

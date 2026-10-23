@@ -19,7 +19,8 @@
 import { storeGet, storePut } from "./host";
 import { sh, storageDir, JOB_HEARTBEAT, JOB_ALIVE } from "./storage";
 import { detectRoots, invalidateRoots } from "./profiles";
-import { orcaProfilesDir, bridgeConfig, invalidateBridgeToken, DEFAULT_BRIDGE_URL } from "./config";
+import { orcaProfilesDir, orcaPath, bridgeConfig, invalidateBridgeToken, DEFAULT_BRIDGE_URL, DEFAULT_ORCA_PATH } from "./config";
+import { findOrca } from "./slice";
 import { listPrinters, putPrinter, withCorrectedSerial } from "./printers";
 import { bridgeHealth, fetchBridgePrinters, serialFixes, registerWithBridge, BridgeHealth } from "./drivers/bambu";
 import { defaultTransport } from "./transport";
@@ -285,14 +286,19 @@ function pollJob(job: SetupJob): { job: SetupJob; view: SetupView } {
 
 // ── what's needed ───────────────────────────────────────────────────────────
 
-/// Why OrcaSlicer must be installed, or null when profiles are available (or
-/// the user pointed us at their own profile dirs).
-function orcaNeed(): { kind: "missing"; reason: string } | null {
-  if (orcaProfilesDir()) return null;
-  if (detectRoots().some((r) => r.kind === "system")) return null;
-  // An extracted install we can't read profiles from: never clobber it.
+/// Why OrcaSlicer must be installed (no binary, or no profiles), "config" when
+/// the user's own `orca_path` points nowhere (installing wouldn't help), or
+/// null when slicing is ready.
+function orcaNeed(): { kind: "missing" | "config"; reason: string } | null {
+  const profiles = !!orcaProfilesDir() || detectRoots().some((r) => r.kind === "system");
+  const bin = findOrca();
+  if (profiles && bin) return null;
+  if (!bin && orcaPath() !== DEFAULT_ORCA_PATH) {
+    return { kind: "config", reason: `the “OrcaSlicer executable” setting (${orcaPath()}) doesn't point at a program on this host` };
+  }
+  // An extracted install we can't fully use: never clobber it.
   if (sh('[ -e "$HOME/.local/share/orca-slicer/AppRun" ] && echo y; true', [], 15).trim() === "y") return null;
-  return { kind: "missing", reason: "no OrcaSlicer profiles on this host" };
+  return { kind: "missing", reason: bin ? "no OrcaSlicer profiles on this host" : "OrcaSlicer isn't installed" };
 }
 
 /// Why print-bridge must be (re)installed, or null. Only for the default
@@ -364,8 +370,14 @@ export function ensureSetup(force?: SetupName): SetupState {
 
   let orcaJob = getJob("orca");
   const oNeed = orcaJob?.status === "running" ? null : orcaNeed();
-  if (shouldStart(orcaJob, oNeed, now, force === "orca")) orcaJob = startJob("orca", oNeed!.reason);
-  const orca = viewOf(orcaJob, oNeed);
+  let orca: SetupView;
+  if (oNeed?.kind === "config") {
+    orca = { status: "failed", reason: oNeed.reason, error: `Slicing is unavailable: ${oNeed.reason}. Clear the setting to let Print Farm install OrcaSlicer itself.` };
+  } else {
+    const need = oNeed ? { kind: "missing" as const, reason: oNeed.reason } : null;
+    if (shouldStart(orcaJob, need, now, force === "orca")) orcaJob = startJob("orca", need!.reason);
+    orca = viewOf(orcaJob, need);
+  }
 
   let bridge: SetupView | null = null;
   const notices: string[] = [];

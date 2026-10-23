@@ -160,7 +160,14 @@ last with `done: true`. Retry a failed chunk with the `size` the error reports.
   (STL / 3MF models; G-code and `.gcode.3mf` by layer, extrusion vs travel),
   the slice form (printer + Orca vendor / printer / filament / process
   comboboxes), job progress + estimate, and send (upload only, or upload &
-  start after a confirm). `GET diagnostics` problems show as a banner.
+  start after a confirm). 3MF goes through `ui/threemf.ts`, which follows
+  3MF Production `p:path` components (Bambu Studio / OrcaSlicer projects keep
+  meshes in `3D/Objects/*.model`), applies component + build-item transforms
+  and units, and reads plates from `Metadata/model_settings.config` (a plate
+  picker for multi-plate projects; `Metadata/plate_1.png` shows while the
+  meshes build). With a single printer (or a single one with defaults) the
+  slice form preselects it and its profiles. Slicer setup states (installing,
+  failed + Retry) live only in the page-wide setup banner.
 - **Printers**: add / edit / remove / test connection ("Connecting… (up to
   40 s)"), per-type fields, saved-secret state, default Orca profiles. Bambu
   rows show the print-bridge status and any serial Print Farm corrected.

@@ -55,7 +55,7 @@ export function printerStatus(args: any): unknown {
 export function profileList(args: any): unknown {
   const note = setupNote("OrcaSlicer", ensureSetupQuiet()?.orca);
   const roots = detectRoots();
-  if (!roots.length) return { roots, vendors: [], hint: note ?? "no OrcaSlicer profiles found; set orca_profiles_dir" };
+  if (!roots.length) return { roots, vendors: [], hint: note ?? "no OrcaSlicer profiles yet; Print Farm installs them automatically — try again shortly" };
   if (!s(args.kind) || !s(args.vendor)) return { roots, vendors: listVendors(roots) };
   const kind = parseKind(args.kind);
   const q = s(args.query).toLowerCase();

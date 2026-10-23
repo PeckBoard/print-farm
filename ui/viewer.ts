@@ -24,7 +24,8 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-import { ThreeMFLoader } from "three/examples/jsm/loaders/3MFLoader.js";
+import { BufferAttribute } from "three";
+import type { Parsed3mf } from "./threemf";
 import type { ParsedGcode } from "./gcode";
 
 export interface ViewerTheme {
@@ -136,13 +137,21 @@ export class Viewer {
     this.placeModel(mesh);
   }
 
-  show3mf(buf: ArrayBuffer) {
-    const group = new ThreeMFLoader().parse(buf) as unknown as Object3D;
-    // 3MF materials are often flat white; give everything the theme colour.
-    group.traverse((o) => {
-      const m = o as Mesh;
-      if (m.isMesh) m.material = new MeshStandardMaterial({ color: new Color(this.theme.model), roughness: 0.55, metalness: 0.05 });
-    });
+  /// A parsed 3MF (see threemf.ts): every object, or only those on `plate`.
+  show3mf(parsed: Parsed3mf, plate: number | null = null) {
+    const group = new Group();
+    // Flat shading: project meshes share vertices across hard edges.
+    const mat = new MeshStandardMaterial({ color: new Color(this.theme.model), roughness: 0.55, metalness: 0.05, flatShading: true });
+    for (const o of parsed.objects) {
+      if (plate !== null && o.plate !== plate) continue;
+      for (const p of o.parts) {
+        const geo = new BufferGeometry();
+        geo.setAttribute("position", new BufferAttribute(p.positions, 3));
+        geo.setIndex(new BufferAttribute(p.indices, 1));
+        geo.computeVertexNormals();
+        group.add(new Mesh(geo, mat));
+      }
+    }
     this.placeModel(group);
   }
 

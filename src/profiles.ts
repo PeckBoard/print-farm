@@ -363,7 +363,7 @@ function grepByName(roots: ProfileRoot[], name: string, kind: ProfileKind): Prof
 /// (the UI passes the vendor the user picked the preset from).
 export function resolveProfile(name: string, kind: ProfileKind, vendor?: string): { profile: Record<string, unknown>; vendor: string } {
   const roots = detectRoots();
-  if (!roots.length) throw new Error("no OrcaSlicer profile directories found; set orca_profiles_dir");
+  if (!roots.length) throw new Error("no OrcaSlicer profiles on this host yet (Print Farm installs them automatically)");
   const search: string[] = [];
   if (vendor) search.push(vendor);
   search.push("User");
