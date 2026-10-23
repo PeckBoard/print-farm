@@ -15,6 +15,7 @@ declare module "extism:host" {
   interface user {
     peckboard_get_plugin_setting(ptr: I64): I64;
     peckboard_store_put(ptr: I64): I64;
+    peckboard_store_put_if_absent(ptr: I64): I64;
     peckboard_store_get(ptr: I64): I64;
     peckboard_store_list(ptr: I64): I64;
     peckboard_store_delete(ptr: I64): I64;
