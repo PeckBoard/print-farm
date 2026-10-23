@@ -26,7 +26,7 @@ import { bridgeHealth, fetchBridgePrinters, serialFixes, registerWithBridge, Bri
 import { defaultTransport } from "./transport";
 import { PrinterRecord } from "./drivers/types";
 
-export const MIN_BRIDGE_VERSION = "0.1.4";
+export const MIN_BRIDGE_VERSION = "0.1.5";
 
 export type SetupName = "orca" | "bridge";
 

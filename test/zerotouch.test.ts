@@ -89,8 +89,8 @@ describe("version comparison", () => {
   });
   it("decides when the bridge needs an install", () => {
     const url = "http://127.0.0.1:7781";
-    expect(bridgeNeed({ reachable: true, version: "0.1.3", token_source: "file" }, url)?.kind).toBe("upgrade");
-    expect(bridgeNeed({ reachable: true, version: "0.1.4", token_source: "file" }, url)).toBeNull();
+    expect(bridgeNeed({ reachable: true, version: "0.1.4", token_source: "file" }, url)?.kind).toBe("upgrade");
+    expect(bridgeNeed({ reachable: true, version: "0.1.5", token_source: "file" }, url)).toBeNull();
     expect(bridgeNeed({ reachable: false, token_source: "none" }, url)?.kind).toBe("missing");
     expect(bridgeNeed({ reachable: false, auth_failed: true, token_source: "file" }, url)).toBeNull();
     expect(bridgeNeed({ reachable: false, token_source: "none" }, "http://10.0.0.5:7781")).toBeNull();
