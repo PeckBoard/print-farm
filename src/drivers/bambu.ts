@@ -104,7 +104,16 @@ export function bambuDriver(p: PrinterRecord, t: Transport, bridge: BridgeConfig
         if (h.status === 401 || h.status === 403) return { ok: false, detail: TOKEN_REJECTED };
         const health = jsonBody(expectOk(h, "bridge /health"), "bridge health");
         registerWithBridge(p, t, bridge);
-        const st = this.status();
+        // The printer's TLS handshake takes 5-40 s, so a status read right
+        // after (re)registering says "offline". Long-poll until it connects
+        // (bridge >= 0.1.2; older bridges ignore `wait` and answer at once).
+        let st: PrinterStatus;
+        try {
+          const r = req({ method: "GET", path: "/status?wait=40", timeoutSecs: 50 });
+          st = coerceStatus(jsonBody(expectOk(r, "bridge status"), "bridge status"));
+        } catch (e) {
+          st = emptyStatus("offline", (e as Error).message);
+        }
         return {
           ok: st.state !== "offline",
           detail: `print-bridge ${health.version ?? ""}: printer ${st.state}${st.message ? " — " + st.message : ""}`,
