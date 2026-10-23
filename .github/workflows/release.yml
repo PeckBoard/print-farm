@@ -1,0 +1,67 @@
+name: Release
+
+# Builds dist/plugin.wasm and publishes it as `print-farm.wasm` on the
+# release v<package.json version>. Runs on every push to main; a version
+# whose release already carries the asset is left alone, so bump
+# package.json to cut a new release.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Version
+        id: v
+        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.v.outputs.tag }}" --json assets,isDraft \
+               --jq 'select(.isDraft == false) | .assets[].name' 2>/dev/null | grep -qx print-farm.wasm; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install extism-js
+        if: steps.check.outputs.done != 'true'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/extism/js-pdk/main/install.sh -o install.sh
+          sudo bash install.sh
+          extism-js --version
+
+      - name: Build and test
+        if: steps.check.outputs.done != 'true'
+        run: |
+          npm ci
+          npm test
+          ./build.sh
+          cp dist/plugin.wasm print-farm.wasm
+          sha256sum print-farm.wasm
+
+      - name: Publish release
+        if: steps.check.outputs.done != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" print-farm.wasm --clobber
+            gh release edit "$TAG" --draft=false --latest
+          else
+            gh release create "$TAG" print-farm.wasm --title "$TAG" \
+              --notes "print-farm $TAG — install via Settings → Plugins (PeckBoard registry)." --latest
+          fi
