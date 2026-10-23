@@ -5,7 +5,23 @@
 // printer's settings screen) or, on older builds, X-Api-Key.
 
 import { Transport, HttpReq, jsonBody, expectOk } from "../transport";
-import { PrinterDriver, PrinterRecord, PrinterStatus, PrinterState, emptyStatus, baseUrl, num, clamp01, temp, Snapshot, encPath } from "./types";
+import {
+  PrinterDriver,
+  PrinterRecord,
+  PrinterStatus,
+  PrinterState,
+  RemoteFile,
+  emptyStatus,
+  baseUrl,
+  num,
+  clamp01,
+  temp,
+  Snapshot,
+  encPath,
+  detailFrom,
+  noCapabilities,
+  unsupported,
+} from "./types";
 
 const STATE_MAP: Record<string, PrinterState> = {
   IDLE: "idle",
@@ -126,5 +142,37 @@ export function prusalinkDriver(p: PrinterRecord, t: Transport): PrinterDriver {
         return { ok: false, detail: (e as Error).message };
       }
     },
+    capabilities() {
+      const caps = noCapabilities();
+      caps.job = { pause: true, resume: true, stop: true, speed_levels: false, speed_percent: false };
+      caps.files = true;
+      caps.camera = true;
+      return caps;
+    },
+    detail() {
+      return detailFrom(this.status());
+    },
+    control(a) {
+      if (a.action === "pause") this.pause();
+      else if (a.action === "resume") this.resume();
+      else if (a.action === "stop") this.cancel();
+      else throw unsupported(a.action);
+      return { ok: true };
+    },
+    files() {
+      const r = expectOk(req({ method: "GET", path: `/api/v1/files/${storage}`, timeoutSecs: 15 }), "prusalink files");
+      return prusalinkFiles(jsonBody(r, "prusalink files"));
+    },
+    deleteFile(name) {
+      expectOk(req({ method: "DELETE", path: `/api/v1/files/${storage}/${encPath(name)}`, timeoutSecs: 15 }), "prusalink delete");
+    },
   };
+}
+
+/// `/api/v1/files/{storage}` → the printable files at its top level. Pure.
+export function prusalinkFiles(body: any): RemoteFile[] {
+  const list: any[] = Array.isArray(body?.children) ? body.children : [];
+  return list
+    .filter((e) => typeof e?.name === "string" && e.type !== "FOLDER")
+    .map((e) => ({ name: e.name, size: num(e.size) ?? 0, mtime: num(e.m_timestamp) }));
 }

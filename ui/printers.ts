@@ -3,7 +3,7 @@
 
 import { h, clear, icon, btn, toast, errText, confirmDialog, openModal, field, select } from "./dom";
 import { get, post, put, del } from "./api";
-import { state, Printer, Diagnostics, loadPrinters, SETUP_DONE } from "./state";
+import { state, Printer, Diagnostics, loadPrinters, SETUP_DONE, openPrinter } from "./state";
 import { TYPE_LABELS, TYPE_SHORT } from "./format";
 import { PrinterDraft, validatePrinter, printerBody } from "./validate";
 import { profilePicker } from "./profilePicker";
@@ -129,6 +129,7 @@ export function printersView(onChanged: () => void): PrintersView {
       h(
         "div",
         { class: "acts" },
+        btn("Controls", { cls: "sm", icon: "sliders", aria: "Open controls for " + p.name, onClick: () => openPrinter(p.id) }),
         testBtn,
         btn("Edit", { cls: "sm", icon: "edit", aria: "Edit " + p.name, onClick: () => openForm(p) }),
         btn("Remove", { cls: "sm danger", icon: "trash", aria: "Remove " + p.name, onClick: () => remove(p) }),

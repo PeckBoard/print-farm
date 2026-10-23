@@ -152,6 +152,12 @@ export interface Setup {
 export const SETUP_DONE = "pf-setup-done";
 /// Fired on window whenever the setup state was (re)loaded.
 export const SETUP_CHANGED = "pf-setup-changed";
+/// Fired on window to open a printer's control panel: `detail: { id }`.
+export const OPEN_PRINTER = "pf-open-printer";
+
+export function openPrinter(id: string): void {
+  window.dispatchEvent(new CustomEvent(OPEN_PRINTER, { detail: { id } }));
+}
 
 /// Why slicing / profile picking waits on the automatic OrcaSlicer setup, or
 /// null when it's done. One wording for every surface (picker, Slice button).

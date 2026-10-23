@@ -11,7 +11,8 @@
 
 import { storeGet, storePut, storeList } from "./host";
 import { nextSeq } from "./counter";
-import { requireFile, FileRecord, FileKind } from "./storage";
+import { requireFile, listFiles, FileRecord, FileKind } from "./storage";
+import { withSpools } from "./spools";
 import { PrinterRecord, PrinterType, StartOptions } from "./drivers/types";
 import { driverFor } from "./drivers";
 import { defaultTransport } from "./transport";
@@ -57,12 +58,16 @@ export function checkCompatible(type: PrinterType, kind: FileKind): void {
   }
 }
 
-/// Decide what an ask_user answer means for a queued print. Pure — tested.
-export function confirmationVerdict(ans: { status: string; answer?: string; rejected?: boolean }): "start" | "pending" | "declined" | "unknown" {
+/// Decide what an ask_user answer means for a queued print (or, with
+/// `confirm`, any confirmed action). Pure — tested.
+export function confirmationVerdict(
+  ans: { status: string; answer?: string; rejected?: boolean },
+  confirm: string = CONFIRM_LABEL,
+): "start" | "pending" | "declined" | "unknown" {
   if (ans.status === "pending") return "pending";
   if (ans.status !== "answered") return "unknown";
   if (ans.rejected) return "declined";
-  return (ans.answer ?? "").trim() === CONFIRM_LABEL ? "start" : "declined";
+  return (ans.answer ?? "").trim() === confirm ? "start" : "declined";
 }
 
 export function publicJob(j: PrintJob): Omit<PrintJob, "token"> {
@@ -155,4 +160,60 @@ export function dismissPrint(job: PrintJob): PrintJob {
 
 export function newToken(): string {
   return "pf-" + randomHex(16);
+}
+
+/// Start a file that is already on the printer's storage (a UI click). Bambu
+/// spool matching needs the file's filament list, which comes from a stored
+/// copy with the same name (auto-match, or explicit `spools`). Without one,
+/// explicit `spools` are applied in order; with neither, the print uses the
+/// AMS when trays are loaded and the external spool isn't the active one,
+/// else the external spool. `note` says which.
+export function startPrinterFile(
+  printer: PrinterRecord,
+  name: string,
+  plate: number,
+  choices: unknown[] | null,
+): { print: PrintJob; note: string | null } {
+  const local = listFiles().find((f) => f.complete && f.name === name && (printer.type !== "bambu" || f.kind === "gcode.3mf")) ?? null;
+  let options: StartOptions | undefined = printer.type === "bambu" ? { plate } : undefined;
+  let summary: string | undefined;
+  let note: string | null = null;
+  if (printer.type === "bambu") {
+    if (local || choices?.length) {
+      const f: FileRecord = local ?? {
+        id: "",
+        name,
+        kind: "other",
+        path: "",
+        size: 0,
+        complete: true,
+        source: "upload",
+        filaments: { [String(plate)]: (choices ?? []).map((_c, i) => ({ id: i + 1, type: "", color: "" })) },
+      };
+      const r = withSpools(printer, f, options, choices);
+      options = r.options;
+      summary = r.plan?.summary;
+      if (!local) note = "No stored copy of this file, so its filaments are unknown: the chosen spools are used in order.";
+      else if (summary) note = `Spools ${choices?.length ? "chosen" : "auto-matched"}: ${summary}.`;
+    } else {
+      const ams = driverFor(printer, defaultTransport, bridgeConfig()).status().ams ?? null;
+      const useAms = !!ams && ams.trays.length > 0 && ams.active !== "external";
+      options = { plate, use_ams: useAms };
+      note = useAms
+        ? "No stored copy of this file, so spools couldn't be matched: printing from the AMS in the printer's own filament order."
+        : "No stored copy of this file, so spools couldn't be matched: printing from the external spool.";
+    }
+  }
+  const job: PrintJob = {
+    id: "r" + nextSeq("print_seq"),
+    printer_id: printer.id,
+    file_id: local?.id ?? "",
+    remote_name: name,
+    status: "uploaded",
+    requested_by: "ui",
+  };
+  if (options) job.options = options;
+  if (summary) job.spools = summary;
+  putPrint(job);
+  return { print: startPrint(printer, job), note };
 }

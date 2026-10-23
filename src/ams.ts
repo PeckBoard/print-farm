@@ -29,6 +29,9 @@ export interface AmsTray {
 export interface AmsState {
   trays: AmsTray[];
   external: { type: string; color: string | null } | null;
+  /// The spool feeding the toolhead now: a global slot, "external", or null
+  /// (none / unknown). Bambu `ams.tray_now` (print-bridge >= 0.1.7).
+  active?: number | "external" | null;
 }
 
 /// "ams:<slot>" or "external".
@@ -97,7 +100,8 @@ export function coerceAms(v: any): AmsState | null {
   const e = v.external;
   const external = e && typeof e.type === "string" && e.type ? { type: e.type, color: typeof e.color === "string" ? e.color : null } : null;
   if (!trays.length && !external) return null;
-  return { trays, external };
+  const active = v.active === "external" ? "external" : Number.isInteger(v.active) && v.active >= 0 ? (v.active as number) : null;
+  return { trays, external, active };
 }
 
 /// `PLA`, `pla`, `PLA Basic` → `PLA`; `PLA-CF`, `PLA+` → `PLA` family.

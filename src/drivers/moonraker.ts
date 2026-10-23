@@ -6,12 +6,19 @@ import {
   PrinterRecord,
   PrinterStatus,
   PrinterState,
+  PrinterDetail,
+  Capabilities,
+  ControlAction,
   emptyStatus,
   baseUrl,
   num,
   clamp01,
   temp,
   Snapshot,
+  encPath,
+  detailFrom,
+  noCapabilities,
+  unsupported,
 } from "./types";
 
 const STATE_MAP: Record<string, PrinterState> = {
@@ -127,7 +134,87 @@ export function moonrakerDriver(p: PrinterRecord, t: Transport): PrinterDriver {
         return { ok: false, detail: (e as Error).message };
       }
     },
+    capabilities() {
+      return moonrakerCapabilities();
+    },
+    detail() {
+      let res;
+      try {
+        res = req({ method: "GET", path: `/printer/objects/query?${QUERY}&gcode_move&fan`, timeoutSecs: 8 });
+      } catch (e) {
+        return detailFrom(emptyStatus("offline", (e as Error).message));
+      }
+      if (res.status < 200 || res.status >= 300) return detailFrom(emptyStatus("offline", `HTTP ${res.status}`));
+      return moonrakerDetail(jsonBody(res, "moonraker status").result);
+    },
+    control(a) {
+      if (a.action === "pause") post("/printer/print/pause", "moonraker pause");
+      else if (a.action === "resume") post("/printer/print/resume", "moonraker resume");
+      else if (a.action === "stop") post("/printer/print/cancel", "moonraker cancel");
+      else post(`/printer/gcode/script?script=${encodeURIComponent(gcodeFor(a))}`, `moonraker ${a.action}`);
+      return { ok: true };
+    },
+    files() {
+      const r = expectOk(req({ method: "GET", path: "/server/files/list?root=gcodes", timeoutSecs: 15 }), "moonraker files");
+      const list: any[] = jsonBody(r, "moonraker files").result ?? [];
+      return list
+        .filter((f) => typeof f?.path === "string")
+        .map((f) => ({ name: f.path, size: num(f.size) ?? 0, mtime: num(f.modified) !== null ? Math.round(f.modified) : null }));
+    },
+    deleteFile(name) {
+      expectOk(req({ method: "DELETE", path: `/server/files/gcodes/${encPath(name)}`, timeoutSecs: 15 }), "moonraker delete");
+    },
   };
+}
+
+export function moonrakerCapabilities(): Capabilities {
+  const caps = noCapabilities();
+  caps.job = { pause: true, resume: true, stop: true, speed_levels: false, speed_percent: true };
+  caps.temps = { nozzle: { max: 300 }, bed: { max: 120 }, chamber: null };
+  caps.motion = true;
+  caps.extrude = true;
+  caps.fans = ["part"];
+  caps.files = true;
+  caps.gcode = true;
+  caps.camera = true;
+  return caps;
+}
+
+/// Status + speed factor and part-fan speed from the same query. Pure.
+export function moonrakerDetail(result: any): PrinterDetail {
+  const d = detailFrom(moonrakerStatus(result));
+  const s = result?.status ?? {};
+  const factor = num(s.gcode_move?.speed_factor);
+  if (factor !== null) d.speed_percent = Math.round(factor * 100);
+  const fan = num(s.fan?.speed);
+  if (fan !== null) d.fans.part = Math.round(fan * 100);
+  return d;
+}
+
+/// G-code for a (validated) non-job action; shared with OctoPrint. Pure.
+export function gcodeFor(a: ControlAction): string {
+  switch (a.action) {
+    case "speed":
+      return `M220 S${a.percent ?? 100}`;
+    case "temp":
+      return a.heater === "bed" ? `M140 S${a.target}` : `M104 S${a.target}`;
+    case "fan":
+      return `M106 S${Math.round((a.percent * 255) / 100)}`;
+    case "home":
+      return "G28";
+    case "jog": {
+      const feed = a.axis === "z" ? 600 : 3000;
+      return `G91\nG1 ${a.axis.toUpperCase()}${a.distance} F${feed}\nG90`;
+    }
+    case "motors_off":
+      return "M18";
+    case "extrude":
+      return `M83\nG1 E${a.mm} F300`;
+    case "gcode":
+      return a.line;
+    default:
+      throw unsupported(a.action);
+  }
 }
 
 /// Resolve a webcam URL that may be relative to the printer host.

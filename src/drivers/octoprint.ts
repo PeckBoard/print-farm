@@ -1,7 +1,24 @@
 // OctoPrint driver — https://docs.octoprint.org/en/master/api/
 
 import { Transport, HttpReq, jsonBody, expectOk } from "../transport";
-import { PrinterDriver, PrinterRecord, PrinterStatus, emptyStatus, baseUrl, num, clamp01, temp, Snapshot, encPath } from "./types";
+import {
+  PrinterDriver,
+  PrinterRecord,
+  PrinterStatus,
+  Capabilities,
+  ControlAction,
+  RemoteFile,
+  emptyStatus,
+  baseUrl,
+  num,
+  clamp01,
+  temp,
+  Snapshot,
+  encPath,
+  detailFrom,
+  noCapabilities,
+} from "./types";
+import { gcodeFor } from "./moonraker";
 
 /// Map `/api/job` + `/api/printer` (null when 409 — printer not connected)
 /// onto the normalised status. Pure.
@@ -135,5 +152,76 @@ export function octoprintDriver(p: PrinterRecord, t: Transport): PrinterDriver {
         return { ok: false, detail: (e as Error).message };
       }
     },
+    capabilities() {
+      return octoprintCapabilities();
+    },
+    detail() {
+      return detailFrom(this.status());
+    },
+    control(a) {
+      const r = octoprintRequest(a);
+      command(r.path, r.body, `octoprint ${a.action}`);
+      return { ok: true };
+    },
+    files() {
+      const r = expectOk(req({ method: "GET", path: "/api/files/local?recursive=true", timeoutSecs: 15 }), "octoprint files");
+      return flattenOctoprintFiles(jsonBody(r, "octoprint files").files);
+    },
+    deleteFile(name) {
+      expectOk(req({ method: "DELETE", path: `/api/files/local/${encPath(name)}`, timeoutSecs: 15 }), "octoprint delete");
+    },
   };
+}
+
+export function octoprintCapabilities(): Capabilities {
+  const caps = noCapabilities();
+  caps.job = { pause: true, resume: true, stop: true, speed_levels: false, speed_percent: true };
+  caps.temps = { nozzle: { max: 300 }, bed: { max: 120 }, chamber: null };
+  caps.motion = true;
+  caps.extrude = true;
+  caps.fans = ["part"];
+  caps.files = true;
+  caps.gcode = true;
+  caps.camera = true;
+  return caps;
+}
+
+/// A validated action → the OctoPrint REST call. Pure.
+export function octoprintRequest(a: ControlAction): { path: string; body: Record<string, unknown> } {
+  switch (a.action) {
+    case "pause":
+      return { path: "/api/job", body: { command: "pause", action: "pause" } };
+    case "resume":
+      return { path: "/api/job", body: { command: "pause", action: "resume" } };
+    case "stop":
+      return { path: "/api/job", body: { command: "cancel" } };
+    case "home":
+      return { path: "/api/printer/printhead", body: { command: "home", axes: ["x", "y", "z"] } };
+    case "jog":
+      return { path: "/api/printer/printhead", body: { command: "jog", [a.axis]: a.distance } };
+    case "temp":
+      return a.heater === "bed"
+        ? { path: "/api/printer/bed", body: { command: "target", target: a.target } }
+        : { path: "/api/printer/tool", body: { command: "target", targets: { tool0: a.target } } };
+    case "extrude":
+      return { path: "/api/printer/tool", body: { command: "extrude", amount: a.mm } };
+    default:
+      // speed / fan / motors_off / gcode go through the raw command API.
+      return { path: "/api/printer/command", body: { commands: gcodeFor(a).split("\n") } };
+  }
+}
+
+/// `/api/files/local?recursive=true` → flat machine-code files. Pure.
+export function flattenOctoprintFiles(entries: any): RemoteFile[] {
+  const out: RemoteFile[] = [];
+  const walk = (list: any) => {
+    for (const e of Array.isArray(list) ? list : []) {
+      if (e?.type === "folder") walk(e.children);
+      else if (typeof e?.path === "string" || typeof e?.name === "string") {
+        out.push({ name: e.path ?? e.name, size: num(e.size) ?? 0, mtime: num(e.date) });
+      }
+    }
+  };
+  walk(entries);
+  return out;
 }

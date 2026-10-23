@@ -57,7 +57,7 @@ export function storageDir(): string {
   const override = storageDirSetting();
   const out = sh(
     'd=${1:-${XDG_DATA_HOME:-$HOME/.local/share}/peckboard-print-farm}; ' +
-      'mkdir -p "$d/files" "$d/jobs" "$d/snapshots" && cd "$d" && pwd -P',
+      'mkdir -p "$d/files" "$d/jobs" "$d/snapshots" "$d/captures" && cd "$d" && pwd -P',
     [override],
   ).trim();
   if (!out.startsWith("/")) throw new Error("could not resolve the storage dir");

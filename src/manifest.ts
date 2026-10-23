@@ -25,6 +25,29 @@ const ICON =
   '<rect x="6" y="14" width="12" height="8"/></svg>';
 
 const PRINTER_REF = "Printer id or name (see printer_list).";
+function printerOnly() {
+  return {
+    type: "object",
+    properties: { printer: { type: "string", description: PRINTER_REF } },
+    required: ["printer"],
+    additionalProperties: false,
+  };
+}
+
+/// A human-confirmed printer action: `props` on the first call, the pending
+/// action's id + token on the second.
+function confirmSchema(props: Record<string, unknown>) {
+  return {
+    type: "object",
+    properties: {
+      printer: { type: "string", description: PRINTER_REF },
+      ...props,
+      action_id: { type: "string", description: "Second call: the pending action's id." },
+      confirmation_token: { type: "string", description: "Second call: the token from the first call." },
+    },
+    additionalProperties: false,
+  };
+}
 
 const MCP_TOOLS = [
   {
@@ -178,6 +201,145 @@ const MCP_TOOLS = [
       required: ["printer"],
       additionalProperties: false,
     },
+  },
+  {
+    name: "printer_capabilities",
+    description:
+      "Which controls a printer supports: job pause/resume/stop and speed (levels 1-4 or percent), " +
+      "settable heaters with their max °C, motion, extrude, load/unload, fans, light, AMS, storage, G-code, camera, errors.",
+    input_schema: printerOnly(),
+  },
+  {
+    name: "printer_detail",
+    description:
+      "printer_status plus control-panel fields: speed_level/speed_percent, fan speeds (%), light, Wi-Fi signal, " +
+      "firmware, developer_mode (Bambu; false = the printer refuses LAN control), active errors, AMS trays.",
+    input_schema: printerOnly(),
+  },
+  {
+    name: "printer_errors",
+    description: "Active printer errors (HMS codes with text when known and a wiki link) and the fix when the printer needs Developer Mode.",
+    input_schema: printerOnly(),
+  },
+  {
+    name: "printer_set_temperature",
+    description: "Set a heater target in °C (0 = off). Limits come from printer_capabilities.",
+    input_schema: {
+      type: "object",
+      properties: {
+        printer: { type: "string", description: PRINTER_REF },
+        heater: { type: "string", enum: ["nozzle", "bed", "chamber"] },
+        target: { type: "number" },
+      },
+      required: ["printer", "heater", "target"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "printer_set_fan",
+    description: "Set a fan's speed in percent (0-100). Available fans are in printer_capabilities.",
+    input_schema: {
+      type: "object",
+      properties: {
+        printer: { type: "string", description: PRINTER_REF },
+        fan: { type: "string", enum: ["part", "aux", "chamber"] },
+        percent: { type: "number" },
+      },
+      required: ["printer", "fan", "percent"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "printer_set_light",
+    description: "Turn the chamber light on or off.",
+    input_schema: {
+      type: "object",
+      properties: { printer: { type: "string", description: PRINTER_REF }, on: { type: "boolean" } },
+      required: ["printer", "on"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "printer_set_speed",
+    description:
+      "Change the print speed: level 1-4 (silent/standard/sport/ludicrous, Bambu) or percent 10-300 (Klipper/OctoPrint).",
+    input_schema: {
+      type: "object",
+      properties: {
+        printer: { type: "string", description: PRINTER_REF },
+        level: { type: "integer", minimum: 1, maximum: 4 },
+        percent: { type: "number" },
+      },
+      required: ["printer"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "printer_move",
+    description:
+      "Home, jog (axis + distance mm, |distance| ≤ 100) or turn the motors off. MOVES HARDWARE: the first call asks " +
+      "the user; call again with action_id + confirmation_token after they answer. Refused while printing.",
+    input_schema: confirmSchema({
+      action: { type: "string", enum: ["home", "jog", "motors_off"] },
+      axis: { type: "string", enum: ["x", "y", "z"] },
+      distance: { type: "number", description: "mm, negative moves the other way." },
+    }),
+  },
+  {
+    name: "printer_extrude",
+    description:
+      "Extrude or retract mm of filament (nozzle ≥ 170 °C), or load (slot = AMS tray 0-15 or \"external\") / unload " +
+      "filament. Needs the user's confirmation like printer_move. Refused while printing.",
+    input_schema: confirmSchema({
+      action: { type: "string", enum: ["extrude", "retract", "load", "unload"] },
+      mm: { type: "number" },
+      slot: { type: "string", description: 'AMS tray "0"-"15" (unit*4+tray), or "external".' },
+    }),
+  },
+  {
+    name: "printer_gcode",
+    description: "Run one G-code line (≤ 256 chars). Needs the user's confirmation like printer_move. Refused while printing.",
+    input_schema: confirmSchema({ line: { type: "string" } }),
+  },
+  {
+    name: "printer_files",
+    description: "List the files on a printer's own storage (name, size, mtime unix seconds).",
+    input_schema: printerOnly(),
+  },
+  {
+    name: "printer_file_delete",
+    description: "Delete a file from a printer's storage (name from printer_files). Needs the user's confirmation like printer_move.",
+    input_schema: confirmSchema({ name: { type: "string" } }),
+  },
+  {
+    name: "print_list",
+    description: "Print records (uploaded / awaiting_confirmation / started / declined / failed, with errors), newest first.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "file_list",
+    description: "Files in Print Farm storage (uploads, sliced output, snapshots) with ids for print_upload / print_start.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "file_delete",
+    description: "Delete a file from Print Farm storage. Needs the user's confirmation: call again with action_id + confirmation_token.",
+    input_schema: {
+      type: "object",
+      properties: {
+        file_id: { type: "string" },
+        action_id: { type: "string", description: "Second call: the pending action's id." },
+        confirmation_token: { type: "string", description: "Second call: the token from the first call." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "camera_capture",
+    description:
+      "Take a camera still and keep it in the printer's capture gallery (Print Farm page). Returns the capture id " +
+      "and the image (content_type + data_base64).",
+    input_schema: printerOnly(),
   },
 ];
 

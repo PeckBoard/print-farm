@@ -62,7 +62,7 @@ describe("bambu via print-bridge", () => {
     const d = bambuDriver(P, t, BRIDGE);
     d.start("cube.gcode.3mf", { use_ams: true, ams_mapping: [2] });
     expect(JSON.parse(t.calls[0].body!)).toEqual({ file: "cube.gcode.3mf", plate: 1, use_ams: true, bed_leveling: true, ams_mapping: [2] });
-    expect(d.status().ams).toEqual(ams);
+    expect(d.status().ams).toEqual({ ...ams, active: null });
   });
 
 

@@ -17,7 +17,9 @@ import { driverFor } from "./drivers";
 import { registerWithBridge, unregisterFromBridge, bridgeDiagnostics } from "./drivers/bambu";
 import { defaultTransport } from "./transport";
 import { bridgeConfig } from "./config";
-import { PrinterRecord } from "./drivers/types";
+import { PrinterRecord, DriverError } from "./drivers/types";
+import { runControl, remoteFiles, validRemoteName } from "./control";
+import { takeCapture, listCaptures, requireCapture, readCapture, deleteCapture, publicCapture } from "./captures";
 import {
   listFiles,
   requireFile,
@@ -30,7 +32,7 @@ import {
 } from "./storage";
 import { detectRoots, listVendors, scanProfiles, parseKind } from "./profiles";
 import { startSlice, pollSlice, listJobs, orcaDiagnostics } from "./slice";
-import { uploadForPrint, startPrint, dismissPrint, listPrints, getPrint, publicJob } from "./prints";
+import { uploadForPrint, startPrint, dismissPrint, listPrints, getPrint, publicJob, startPrinterFile } from "./prints";
 import { autoFill } from "./autoprofiles";
 import { ensureSetup, invalidateSetup, syncSerials, SetupName } from "./setup";
 import { planSpools, spoolChoices, withSpools } from "./spools";
@@ -64,6 +66,21 @@ class HttpError extends Error {
   constructor(public status: number, msg: string) {
     super(msg);
   }
+}
+
+/// HTTP status for a thrown error: its own when it carries one, else 400.
+export function errorStatus(e: unknown): number {
+  return e instanceof HttpError || e instanceof DriverError ? e.status : 400;
+}
+
+/// `{error, hint?, needs_developer_mode?}` for a thrown error. Pure.
+export function errorBody(e: unknown): { error: string; hint?: string; needs_developer_mode?: boolean } {
+  const out: { error: string; hint?: string; needs_developer_mode?: boolean } = { error: errMsg(e) };
+  if (e instanceof DriverError) {
+    if (e.hint) out.hint = e.hint;
+    if (e.needs_developer_mode) out.needs_developer_mode = true;
+  }
+  return out;
 }
 
 function printerOr404(id: string): PrinterRecord {
@@ -168,16 +185,14 @@ export const ROUTES: Array<[string, Handler]> = [
     }),
   ],
   ["GET printers/:id/status", ({ params }) => ({ id: params.id, status: driver(printerOr404(params.id)).status() })],
+  ["GET printers/:id/capabilities", ({ params }) => driver(printerOr404(params.id)).capabilities()],
+  ["GET printers/:id/detail", ({ params }) => driver(printerOr404(params.id)).detail()],
   [
     "POST printers/:id/control",
     ({ params, body }) => {
-      const d = driver(printerOr404(params.id));
-      const action = str(body?.action);
-      if (action === "pause") d.pause();
-      else if (action === "resume") d.resume();
-      else if (action === "cancel") d.cancel();
-      else throw new Error("action must be pause, resume, or cancel");
-      return { ok: true, action };
+      // A UI click: the user's own authority, so motion runs without a prompt.
+      const r = runControl(driver(printerOr404(params.id)), body);
+      return { ...r, action: str(body?.action) === "cancel" ? "stop" : str(body?.action) };
     },
   ],
   [
@@ -186,6 +201,48 @@ export const ROUTES: Array<[string, Handler]> = [
       const snap = driver(printerOr404(params.id)).snapshot();
       if (!snap) throw new HttpError(404, "no camera");
       return snap;
+    },
+  ],
+  ["GET printers/:id/files", ({ params }) => ({ files: remoteFiles(driver(printerOr404(params.id))) })],
+  [
+    "DELETE printers/:id/files",
+    ({ params, query }) => {
+      const p = printerOr404(params.id);
+      const name = queryParam(query, "name") ?? "";
+      if (!validRemoteName(name)) throw new HttpError(400, "invalid file name");
+      driver(p).deleteFile(name);
+      return { removed: name };
+    },
+  ],
+  [
+    "POST printers/:id/files/print",
+    ({ params, body }) => {
+      const p = printerOr404(params.id);
+      const name = str(body?.name);
+      if (!validRemoteName(name)) throw new HttpError(400, "invalid file name");
+      const spools = Array.isArray(body?.spools) ? body.spools : null;
+      const { print, note } = startPrinterFile(p, name, Math.max(1, Number(body?.plate) || 1), spools);
+      return { print: publicJob(print), note };
+    },
+  ],
+  [
+    "POST printers/:id/capture",
+    ({ params }) => publicCapture(takeCapture(printerOr404(params.id)).capture),
+  ],
+  [
+    "GET captures",
+    ({ query }) => ({ captures: listCaptures(queryParam(query, "printer") || undefined).map(publicCapture) }),
+  ],
+  [
+    "GET captures/:id",
+    ({ params, query }) =>
+      readCapture(requireCapture(params.id), Number(queryParam(query, "offset") ?? "0") || 0, Number(queryParam(query, "length") ?? String(MAX_READ)) || MAX_READ),
+  ],
+  [
+    "DELETE captures/:id",
+    ({ params }) => {
+      deleteCapture(params.id);
+      return { removed: params.id };
     },
   ],
   [
@@ -333,7 +390,7 @@ export function serveAuthed(payload: any): string {
       }
     }
   } catch (e) {
-    return jsonResponse(e instanceof HttpError ? e.status : 400, { error: errMsg(e) });
+    return jsonResponse(errorStatus(e), errorBody(e));
   }
   return jsonResponse(404, { error: "not found" });
 }

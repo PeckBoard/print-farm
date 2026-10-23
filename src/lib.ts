@@ -2,7 +2,7 @@
 // call to its handler. The wasm export functions live in `index.ts`.
 
 import { skip, allow, cancel, errMsg } from "./verdict";
-import { serveHttp, serveAuthed } from "./http";
+import { serveHttp, serveAuthed, errorBody } from "./http";
 import { TOOLS } from "./tools";
 
 export function dispatch(hook: string, payload: any): string {
@@ -28,7 +28,8 @@ function handleInvoke(payload: any): string {
   try {
     return allow(fn(payload.arguments ?? {}));
   } catch (e) {
-    // A handler error is a normal tool result (the agent sees the message).
-    return allow({ error: errMsg(e) });
+    // A handler error is a normal tool result (the agent sees the message,
+    // plus the fix when the printer refused for lack of Developer Mode).
+    return allow(errorBody(e));
   }
 }

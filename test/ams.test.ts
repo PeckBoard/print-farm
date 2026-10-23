@@ -113,6 +113,7 @@ describe("bridge status coercion", () => {
     expect(coerceAms({ trays: [{ slot: 5, type: "PLA" }, { slot: "x" }, { slot: 1, type: "" }] })).toEqual({
       trays: [{ slot: 5, unit: 1, tray: 1, type: "PLA", color: null }],
       external: null,
+      active: null,
     });
   });
 });

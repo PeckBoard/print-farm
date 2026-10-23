@@ -7,7 +7,7 @@
 
 import { h, clear, icon, btn, toast, errText, confirmDialog } from "./dom";
 import { get, post } from "./api";
-import { state, Status, Print, printerById, loadPrinters } from "./state";
+import { state, Status, Print, printerById, loadPrinters, openPrinter } from "./state";
 import { fmtDuration, fmtPercent, fmtTemp, statePill, controlsFor, TYPE_SHORT, isQueued } from "./format";
 
 interface CardRefs {
@@ -195,6 +195,9 @@ export function farmView(goPrinters: (addNew: boolean) => void, onQueueCount: (n
       body,
       foot,
     );
+    // Name / camera open the control panel (buttons keep their own action).
+    nameEl.addEventListener("click", () => openPrinter(id));
+    root.querySelector(".cam")!.addEventListener("click", () => openPrinter(id));
     nameEl.id = "card-" + id;
     const refs: CardRefs = { root, pill, img, camMsg, age, body, foot, sig: "", visible: false, snapAt: 0, noCamUntil: 0, busy: false };
     (refs as any).nameEl = nameEl;
@@ -309,6 +312,9 @@ export function farmView(goPrinters: (addNew: boolean) => void, onQueueCount: (n
     if (ctl.resume) c.foot.appendChild(btn("Resume", { icon: "play", cls: "sm primary", disabled: c.busy, onClick: act("resume") }));
     if (ctl.cancel) c.foot.appendChild(btn("Cancel", { icon: "stop", cls: "sm danger", disabled: c.busy, onClick: act("cancel") }));
     if (!ctl.pause && !ctl.resume && !ctl.cancel) c.foot.appendChild(h("span", { class: "reason", text: s.state === "offline" ? "Check the address and that the printer is on." : s.state === "error" ? "Resolve the error on the printer." : "Ready for a new print." }));
+    const controls = btn("Controls", { icon: "sliders", cls: "sm ghost", aria: "Open controls for " + p.name, onClick: () => openPrinter(id) });
+    controls.style.marginLeft = "auto";
+    c.foot.append(controls);
   }
 
   function stat(k: string, v: string) {

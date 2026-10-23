@@ -305,6 +305,24 @@ Command line (one detached job per slice, polled):
   wraps the run in `xvfb-run -a` when there's no display and xvfb-run is
   installed (`GET diagnostics` shows what was found).
 
+## Printer Controls
+
+Beyond start/pause/stop, each printer exposes what its driver supports
+(`GET printers/:id/capabilities`): heater targets, fans, chamber light,
+speed (Bambu levels 1-4 or Klipper/OctoPrint percent), homing/jogging,
+extrude/retract, AMS load/unload, raw G-code, the printer's own storage,
+camera captures, and active errors. Full shapes: `CONTROL_CONTRACT.md`.
+
+- Motion, extrusion, load/unload and G-code are refused while printing or
+  paused, and extrusion with the nozzle under 170 °C.
+- Agents: `printer_set_temperature` / `_fan` / `_light` / `_speed` run
+  directly; `printer_move`, `printer_extrude`, `printer_gcode`,
+  `printer_file_delete` and `file_delete` ask the user first (the same
+  two-phase flow as `print_start`, answer "Yes, do it").
+- Bambu needs print-bridge >= 0.1.7, which waits for the printer's reply.
+  Firmware with Authorization Control refuses unsigned LAN commands until
+  the printer is in **LAN Only Mode with Developer Mode** — the refusal now
+  shows as an error with that fix instead of a silent success.
 ## Known Limits and Caveats
 
 - **Secrets in argv**: curl-path requests (multipart/file uploads, binary

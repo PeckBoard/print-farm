@@ -6,23 +6,27 @@ import { driverFor } from "./drivers";
 import { defaultTransport } from "./transport";
 import { bridgeConfig } from "./config";
 import { detectRoots, listVendors, scanProfiles, parseKind } from "./profiles";
-import { importProjectFile, requireFile, newFileRecord, writeB64, putFile } from "./storage";
+import { importProjectFile, requireFile, newFileRecord, writeB64, putFile, listFiles, deleteFile } from "./storage";
 import { startSlice, pollSlice } from "./slice";
 import {
   uploadForPrint,
   startPrint,
   getPrint,
   putPrint,
+  listPrints,
   publicJob,
   newToken,
   confirmationVerdict,
   CONFIRM_LABEL,
   DECLINE_LABEL,
 } from "./prints";
-import { askUser, getAnswer } from "./host";
-import { PrinterRecord } from "./drivers/types";
+import { askUser, getAnswer, storeGet, storePut } from "./host";
+import { nextSeq } from "./counter";
+import { PrinterRecord, DEVELOPER_MODE_HINT } from "./drivers/types";
 import { ensureSetupQuiet, SetupView } from "./setup";
 import { withSpools } from "./spools";
+import { runControl, parseControl, guardControl, describeAction, validRemoteName, remoteFiles } from "./control";
+import { takeCapture, publicCapture } from "./captures";
 
 /// A one-line note for an agent while an automatic install runs/failed.
 function setupNote(what: string, v: SetupView | null | undefined): string | null {
@@ -193,6 +197,196 @@ export function printSnapshot(args: any): unknown {
   return out;
 }
 
+// ── printer controls ────────────────────────────────────────────────────────────
+
+export function printerCapabilities(args: any): unknown {
+  const p = resolvePrinter(args.printer);
+  return { printer: p.id, capabilities: driver(p).capabilities() };
+}
+
+export function printerDetail(args: any): unknown {
+  const p = resolvePrinter(args.printer);
+  return { printer: p.id, detail: driver(p).detail() };
+}
+
+export function printerErrors(args: any): unknown {
+  const p = resolvePrinter(args.printer);
+  const d = driver(p).detail();
+  const out: Record<string, unknown> = { printer: p.id, state: d.state, message: d.message, developer_mode: d.developer_mode, errors: d.errors };
+  if (d.developer_mode === false || d.errors.some((e) => /Developer Mode/.test(e.text ?? ""))) out.hint = DEVELOPER_MODE_HINT;
+  return out;
+}
+
+/// Tuning that doesn't move anything: runs straight away.
+function direct(body: (args: any) => Record<string, unknown>) {
+  return (args: any): unknown => {
+    const p = resolvePrinter(args.printer);
+    const b = body(args);
+    return { printer: p.id, action: b.action, ...runControl(driver(p), b) };
+  };
+}
+
+export const printerSetTemperature = direct((a) => ({ action: "temp", heater: a.heater, target: a.target }));
+export const printerSetFan = direct((a) => ({ action: "fan", fan: a.fan, percent: a.percent }));
+export const printerSetLight = direct((a) => ({ action: "light", on: a.on }));
+export const printerSetSpeed = direct((a) => ({ action: "speed", level: a.level, percent: a.percent }));
+
+// ── human-confirmed actions (same two-phase flow as print_start) ─────────────
+
+export const RUN_LABEL = "Yes, do it";
+export const SKIP_LABEL = "No";
+const ACTIONS = "pending_actions";
+
+type ActionKind = "printer_move" | "printer_extrude" | "printer_gcode" | "printer_file_delete" | "file_delete";
+
+interface PendingAction {
+  id: string;
+  kind: ActionKind;
+  token: string;
+  status: "awaiting_confirmation" | "done" | "declined" | "failed";
+  question: string;
+  printer_id?: string;
+  /// printer_move / printer_extrude / printer_gcode: the control body.
+  body?: Record<string, unknown>;
+  /// printer_file_delete: the printer-side path; file_delete: the file id.
+  target?: string;
+  error?: string;
+}
+
+function publicAction(a: PendingAction): Omit<PendingAction, "token"> {
+  const { token: _t, ...rest } = a;
+  return rest;
+}
+
+/// Run a stored action once the user said yes.
+function perform(a: PendingAction): unknown {
+  switch (a.kind) {
+    case "printer_file_delete": {
+      const p = resolvePrinter(a.printer_id);
+      driver(p).deleteFile(a.target!);
+      return { removed: a.target };
+    }
+    case "file_delete":
+      deleteFile(requireFile(a.target).id);
+      return { removed: a.target };
+    default:
+      // Re-checked at run time: the printer may have started printing since.
+      return runControl(driver(resolvePrinter(a.printer_id)), a.body);
+  }
+}
+
+/// Phase 1 (`prepare` validates and words the question) or phase 2
+/// (`action_id` + `confirmation_token`: run only if core's answer log shows
+/// the user chose RUN_LABEL — the agent can't forge that).
+function confirmed(kind: ActionKind, prepare: (args: any) => Omit<PendingAction, "id" | "kind" | "token" | "status">) {
+  return (args: any): unknown => {
+    if (s(args.action_id) || s(args.confirmation_token)) {
+      const a = storeGet(ACTIONS, s(args.action_id)) as PendingAction | null;
+      if (!a || a.kind !== kind) throw new Error(`unknown ${kind} action '${s(args.action_id)}'`);
+      if (a.status !== "awaiting_confirmation" || a.token !== s(args.confirmation_token)) {
+        throw new Error(`action ${a.id} is not awaiting this confirmation (status: ${a.status})`);
+      }
+      const verdict = confirmationVerdict(getAnswer(a.token), RUN_LABEL);
+      if (verdict === "pending") return { action: publicAction(a), status: "awaiting_confirmation", message: "The user has not answered yet." };
+      if (verdict !== "start") {
+        storePut(ACTIONS, a.id, { ...a, status: "declined" });
+        return { action: publicAction({ ...a, status: "declined" }), message: "The user did not confirm; nothing was done." };
+      }
+      // Mark done before running so a retried call can't run it twice.
+      storePut(ACTIONS, a.id, { ...a, status: "done" });
+      try {
+        const result = perform(a);
+        return { action: publicAction({ ...a, status: "done" }), result, message: "The user confirmed; done." };
+      } catch (e) {
+        storePut(ACTIONS, a.id, { ...a, status: "failed", error: (e as Error).message });
+        throw e;
+      }
+    }
+    const prepared = prepare(args);
+    const a: PendingAction = { id: "a" + nextSeq("action_seq"), kind, token: newToken(), status: "awaiting_confirmation", ...prepared };
+    storePut(ACTIONS, a.id, a);
+    try {
+      askUser(a.question, [RUN_LABEL, SKIP_LABEL], a.token);
+    } catch (e) {
+      storePut(ACTIONS, a.id, { ...a, status: "declined", error: (e as Error).message });
+      throw new Error(`the user could not be asked here (${(e as Error).message}); ask them to do this from the Print Farm page`);
+    }
+    return {
+      action: publicAction(a),
+      status: "awaiting_confirmation",
+      action_id: a.id,
+      confirmation_token: a.token,
+      message: `The user has been asked to confirm. After they answer, call ${kind} again with action_id and confirmation_token.`,
+    };
+  };
+}
+
+/// Validate a motion body now (so the user isn't asked about something that
+/// can't run) and word the question.
+function prepareControl(args: any, body: Record<string, unknown>) {
+  const p = resolvePrinter(args.printer);
+  const d = driver(p);
+  const a = parseControl(body, d.capabilities());
+  guardControl(a, d.status());
+  return {
+    printer_id: p.id,
+    body,
+    question: `Let the agent ${describeAction(a)} on ${p.name}? This moves the printer — make sure nothing is in the way.`,
+  };
+}
+
+export const printerMove = confirmed("printer_move", (args) => {
+  const action = s(args.action);
+  if (action !== "home" && action !== "jog" && action !== "motors_off") throw new Error("action must be home, jog or motors_off");
+  return prepareControl(args, { action, axis: args.axis, distance: args.distance });
+});
+
+export const printerExtrude = confirmed("printer_extrude", (args) => {
+  const action = s(args.action);
+  const mm = Number(args.mm);
+  if (action === "extrude") return prepareControl(args, { action: "extrude", mm: Math.abs(mm) });
+  if (action === "retract") return prepareControl(args, { action: "extrude", mm: -Math.abs(mm) });
+  if (action === "load") return prepareControl(args, { action: "load", slot: args.slot });
+  if (action === "unload") return prepareControl(args, { action: "unload" });
+  throw new Error("action must be extrude, retract, load or unload");
+});
+
+export const printerGcode = confirmed("printer_gcode", (args) => prepareControl(args, { action: "gcode", line: args.line }));
+
+export const printerFileDelete = confirmed("printer_file_delete", (args) => {
+  const p = resolvePrinter(args.printer);
+  const name = s(args.name);
+  if (!validRemoteName(name)) throw new Error("invalid file name");
+  if (!driver(p).capabilities().files) throw new Error("this printer's storage can't be managed");
+  return { printer_id: p.id, target: name, question: `Delete "${name}" from ${p.name}'s storage? This can't be undone.` };
+});
+
+export const fileDelete = confirmed("file_delete", (args) => {
+  const f = requireFile(s(args.file_id));
+  return { target: f.id, question: `Delete "${f.name}" from Print Farm storage? This can't be undone.` };
+});
+
+// ── listings + camera ───────────────────────────────────────────────────────────────
+
+export function printerFiles(args: any): unknown {
+  const p = resolvePrinter(args.printer);
+  return { printer: p.id, files: remoteFiles(driver(p)) };
+}
+
+export function printList(): unknown {
+  return { prints: listPrints().map(publicJob) };
+}
+
+export function fileList(): unknown {
+  return { files: listFiles().map(({ path: _p, ...rest }) => rest) };
+}
+
+export function cameraCapture(args: any): unknown {
+  const p = resolvePrinter(args.printer);
+  const { capture, data_base64 } = takeCapture(p);
+  return { printer: p.id, capture: publicCapture(capture), content_type: capture.content_type, data_base64 };
+}
+
 export const TOOLS: Record<string, (args: any) => unknown> = {
   printer_list: printerList,
   printer_status: printerStatus,
@@ -203,4 +397,20 @@ export const TOOLS: Record<string, (args: any) => unknown> = {
   print_start: printStart,
   print_control: printControl,
   print_snapshot: printSnapshot,
+  printer_capabilities: printerCapabilities,
+  printer_detail: printerDetail,
+  printer_errors: printerErrors,
+  printer_set_temperature: printerSetTemperature,
+  printer_set_fan: printerSetFan,
+  printer_set_light: printerSetLight,
+  printer_set_speed: printerSetSpeed,
+  printer_move: printerMove,
+  printer_extrude: printerExtrude,
+  printer_gcode: printerGcode,
+  printer_file_delete: printerFileDelete,
+  printer_files: printerFiles,
+  print_list: printList,
+  file_list: fileList,
+  file_delete: fileDelete,
+  camera_capture: cameraCapture,
 };

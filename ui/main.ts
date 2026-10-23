@@ -2,11 +2,15 @@
 // Printers), and the three views. See README "UI API" for the routes.
 
 import { h, icon } from "./dom";
-import { state } from "./state";
+import { state, OPEN_PRINTER } from "./state";
 import { farmView } from "./farm";
 import { printersView } from "./printers";
 import { sliceView } from "./slice";
 import { setupWatch } from "./setup";
+import { openPrinterDetail, DetailHandle } from "./detail";
+import { injectDetailStyles } from "./detailStyles";
+
+injectDetailStyles();
 
 type Tab = "farm" | "slice" | "printers";
 
@@ -79,6 +83,7 @@ app.append(header, main);
 let current: Tab | null = null;
 function go(t: Tab) {
   if (current === t) return;
+  detail?.close();
   if (current === "farm") farm.hide();
   if (current === "slice") slice.hide();
   current = t;
@@ -113,6 +118,32 @@ function renderSummary() {
 }
 setInterval(renderSummary, 2000);
 
-const initial = (location.hash.slice(1) || new URLSearchParams(location.search).get("tab") || "farm") as Tab;
+// Printer control panel: `#printer/<id>` while open, back to the tab after.
+let detail: DetailHandle | null = null;
+function setHash(h: string) {
+  try {
+    history.replaceState(null, "", "#" + h);
+  } catch (_e) {
+    /* sandboxed: ignore */
+  }
+}
+function openDetail(id: string) {
+  if (detail?.id === id) return;
+  detail?.close();
+  const handle = openPrinterDetail(id, () => {
+    if (detail === handle) {
+      detail = null;
+      setHash(current || "farm");
+    }
+  });
+  detail = handle;
+  setHash("printer/" + encodeURIComponent(id));
+}
+window.addEventListener(OPEN_PRINTER, (e) => openDetail((e as CustomEvent<{ id: string }>).detail.id));
+
+const hash = location.hash.slice(1);
+const deepPrinter = hash.startsWith("printer/") ? decodeURIComponent(hash.slice(8)) : null;
+const initial = ((deepPrinter ? "farm" : hash) || new URLSearchParams(location.search).get("tab") || "farm") as Tab;
 go(["farm", "slice", "printers"].indexOf(initial) >= 0 ? initial : "farm");
+if (deepPrinter) openDetail(deepPrinter);
 setup.check();

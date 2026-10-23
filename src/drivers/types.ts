@@ -46,6 +46,95 @@ export interface Snapshot {
   data_base64: string;
 }
 
+export type FanName = "part" | "aux" | "chamber";
+export type Heater = "nozzle" | "bed" | "chamber";
+export type Axis = "x" | "y" | "z";
+
+/// What a printer's controls support; the UI hides the rest.
+export interface Capabilities {
+  job: { pause: boolean; resume: boolean; stop: boolean; speed_levels: boolean; speed_percent: boolean };
+  temps: { nozzle: { max: number } | null; bed: { max: number } | null; chamber: { max: number } | null };
+  motion: boolean;
+  extrude: boolean;
+  load_unload: boolean;
+  fans: FanName[];
+  light: boolean;
+  ams: boolean;
+  files: boolean;
+  gcode: boolean;
+  camera: boolean;
+  errors: boolean;
+}
+
+export interface PrinterError {
+  code: string;
+  text: string | null;
+  severity: string;
+  url?: string;
+}
+
+/// Status plus the control-panel fields.
+export interface PrinterDetail extends PrinterStatus {
+  speed_level: number | null;
+  speed_percent: number | null;
+  fans: Partial<Record<FanName, number>>;
+  light: "on" | "off" | null;
+  wifi_signal: string | null;
+  firmware: string | null;
+  developer_mode: boolean | null;
+  errors: PrinterError[];
+  ams: AmsState | null;
+}
+
+/// A validated control request (see control.ts `parseControl`).
+export type ControlAction =
+  | { action: "pause" }
+  | { action: "resume" }
+  | { action: "stop" }
+  | { action: "speed"; level?: number; percent?: number }
+  | { action: "temp"; heater: Heater; target: number }
+  | { action: "fan"; fan: FanName; percent: number }
+  | { action: "light"; on: boolean }
+  | { action: "home" }
+  | { action: "jog"; axis: Axis; distance: number }
+  | { action: "motors_off" }
+  | { action: "extrude"; mm: number }
+  | { action: "load"; slot: number | "external" }
+  | { action: "unload" }
+  | { action: "gcode"; line: string };
+
+/// `confirmed: false` = sent, but the printer didn't acknowledge it (Bambu).
+export interface ControlResult {
+  ok: true;
+  confirmed?: boolean;
+}
+
+/// A file on the printer's own storage.
+export interface RemoteFile {
+  name: string;
+  size: number;
+  /// Unix seconds, or null when unknown.
+  mtime: number | null;
+}
+
+/// An error with an HTTP status for the UI (and a hint for people/agents).
+export class DriverError extends Error {
+  constructor(
+    public status: number,
+    msg: string,
+    public hint?: string,
+    public needs_developer_mode?: boolean,
+  ) {
+    super(msg);
+  }
+}
+
+export const DEVELOPER_MODE_HINT = "On the printer: Settings → enable LAN Only Mode, then Developer Mode.";
+
+export function unsupported(what: string): DriverError {
+  return new DriverError(400, `${what} is not supported on this printer`);
+}
+
 export interface PrinterDriver {
   status(): PrinterStatus;
   /// Upload a file from local disk (the plugin's storage dir) under `name`.
@@ -58,6 +147,49 @@ export interface PrinterDriver {
   snapshot(): Snapshot | null;
   /// Reachability + credential check.
   test(): { ok: boolean; detail: string };
+  capabilities(): Capabilities;
+  detail(): PrinterDetail;
+  /// Run a validated action (callers go through control.ts `runControl`).
+  control(a: ControlAction): ControlResult;
+  /// Files on the printer's storage.
+  files(): RemoteFile[];
+  deleteFile(name: string): void;
+}
+
+/// A capability set with everything off; drivers switch on what they do.
+export function noCapabilities(): Capabilities {
+  return {
+    job: { pause: false, resume: false, stop: false, speed_levels: false, speed_percent: false },
+    temps: { nozzle: null, bed: null, chamber: null },
+    motion: false,
+    extrude: false,
+    load_unload: false,
+    fans: [],
+    light: false,
+    ams: false,
+    files: false,
+    gcode: false,
+    camera: false,
+    errors: false,
+  };
+}
+
+/// A detail record from a plain status (fields the driver doesn't know: null).
+export function detailFrom(st: PrinterStatus): PrinterDetail {
+  const errors: PrinterError[] =
+    st.state === "error" && st.message ? [{ code: "error", text: st.message, severity: "error" }] : [];
+  return {
+    ...st,
+    speed_level: null,
+    speed_percent: null,
+    fans: {},
+    light: null,
+    wifi_signal: null,
+    firmware: null,
+    developer_mode: null,
+    errors,
+    ams: st.ams ?? null,
+  };
 }
 
 /// Stored printer record (secrets included — never hand this to the UI; see

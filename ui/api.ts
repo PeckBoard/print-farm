@@ -50,8 +50,15 @@ function raw(method: string, path: string, body?: string): Promise<{ status: num
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, msg: string) {
+  /// The parsed error body (`{error, hint?, needs_developer_mode?}`), if any.
+  constructor(public status: number, msg: string, public body: any = null) {
     super(msg);
+  }
+  get hint(): string | null {
+    return typeof this.body?.hint === "string" && this.body.hint ? this.body.hint : null;
+  }
+  get needsDeveloperMode(): boolean {
+    return this.body?.needs_developer_mode === true;
   }
 }
 
@@ -64,9 +71,17 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
     parsed = { error: res.status >= 400 ? `request failed (${res.status})` : "bad response from the plugin" };
   }
   if (res.status >= 400 || (parsed && typeof parsed.error === "string")) {
-    throw new ApiError(res.status, parsed?.error || `request failed (${res.status})`);
+    throw new ApiError(res.status, parsed?.error || `request failed (${res.status})`, parsed);
   }
   return parsed as T;
+}
+
+/// GET an image route as a data: URL. The fetch bridge carries text only, so
+/// image routes answer `{content_type, data_base64}` (like `snapshot`).
+export async function getImage(path: string): Promise<string> {
+  const r = await get<{ content_type?: string; data_base64?: string }>(path);
+  if (!r.data_base64) throw new ApiError(502, "the plugin returned no image data");
+  return `data:${r.content_type || "image/jpeg"};base64,${r.data_base64}`;
 }
 
 export const get = <T = any>(path: string) => api<T>("GET", path);
