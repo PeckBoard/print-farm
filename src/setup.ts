@@ -42,6 +42,8 @@ export interface SetupJob {
   log_tail?: string;
   /// The bridge needs a systemd user manager; without one we can't install.
   no_systemd?: boolean;
+  /// Bridge installs: the MIN_BRIDGE_VERSION this install was started for.
+  target?: string;
 }
 
 export interface SetupView {
@@ -104,14 +106,16 @@ const COOLDOWN_UPGRADE_MS = 12 * 60 * 60 * 1000;
 
 /// Should an install start now? Pure — tested.
 export function shouldStart(
-  job: Pick<SetupJob, "status" | "started_at" | "finished_at"> | null,
-  need: { kind: "missing" | "upgrade" } | null,
+  job: Pick<SetupJob, "status" | "started_at" | "finished_at" | "target"> | null,
+  need: { kind: "missing" | "upgrade"; target?: string } | null,
   now: number,
   force: boolean,
 ): boolean {
   if (job?.status === "running") return false;
   if (!need) return false;
   if (force || !job) return true;
+  // A newer minimum than the last install aimed for: not a retry loop.
+  if (need.kind === "upgrade" && job.status === "succeeded" && need.target && job.target !== need.target) return true;
   const since = now - (job.finished_at ?? job.started_at);
   if (job.status === "failed") return since >= COOLDOWN_FAILED_MS;
   return since >= (need.kind === "upgrade" ? COOLDOWN_UPGRADE_MS : COOLDOWN_REINSTALL_MS);
@@ -366,6 +370,7 @@ function startJob(name: SetupName, reason: string, script: string = SCRIPTS[name
   const dir = `${storageDir()}/setup/${name}`;
   const pid = Number(sh(LAUNCH, [dir, script], 30).trim());
   const job: SetupJob = { name, status: "running", reason, dir, pid: isFinite(pid) ? pid : 0, started_at: Date.now() };
+  if (name === "bridge") job.target = MIN_BRIDGE_VERSION;
   storePut(JOBS, name, job);
   return job;
 }
@@ -444,11 +449,11 @@ function orcaNeed(): { kind: "missing" | "libs" | "config"; reason: string } | n
 
 /// Why print-bridge must be (re)installed, or null. Only for the default
 /// loopback URL — a bridge the user runs elsewhere is theirs to manage. Pure.
-export function bridgeNeed(health: BridgeHealth, url: string): { kind: "missing" | "upgrade"; reason: string } | null {
+export function bridgeNeed(health: BridgeHealth, url: string): { kind: "missing" | "upgrade"; reason: string; target?: string } | null {
   if (url.replace(/\/+$/, "") !== DEFAULT_BRIDGE_URL) return null;
   if (health.reachable) {
     return versionLt(health.version ?? "", MIN_BRIDGE_VERSION)
-      ? { kind: "upgrade", reason: `print-bridge ${health.version ?? "(unknown version)"} is older than ${MIN_BRIDGE_VERSION}` }
+      ? { kind: "upgrade", reason: `print-bridge ${health.version ?? "(unknown version)"} is older than ${MIN_BRIDGE_VERSION}`, target: MIN_BRIDGE_VERSION }
       : null;
   }
   if (health.auth_failed) return null; // running; a token problem isn't fixed by reinstalling
@@ -530,7 +535,7 @@ export function ensureSetup(force?: SetupName): SetupState {
     let bJob = getJob("bridge");
     const cfg = bridgeConfig();
     let health: BridgeHealth | null = null;
-    let bNeed: { kind: "missing" | "upgrade"; reason: string } | null = null;
+    let bNeed: { kind: "missing" | "upgrade"; reason: string; target?: string } | null = null;
     if (bJob?.status !== "running") {
       health = bridgeHealth(defaultTransport, cfg, cfg.token_source);
       bNeed = bridgeNeed(health, cfg.url);

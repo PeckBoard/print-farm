@@ -116,6 +116,12 @@ describe("install scheduling", () => {
     expect(shouldStart(ok, { kind: "upgrade" }, t0 + 3600_000, false)).toBe(false);
     expect(shouldStart(ok, { kind: "upgrade" }, t0 + 13 * 3600_000, false)).toBe(true);
   });
+  it("upgrades at once when the minimum moved past what the last install aimed for", () => {
+    const ok = { status: "succeeded" as const, started_at: t0, finished_at: t0, target: "0.1.3" };
+    expect(shouldStart(ok, { kind: "upgrade", target: "0.1.4" }, t0 + 60_000, false)).toBe(true);
+    expect(shouldStart(ok, { kind: "upgrade", target: "0.1.3" }, t0 + 60_000, false)).toBe(false);
+    expect(shouldStart({ ...ok, target: undefined }, { kind: "upgrade", target: "0.1.4" }, t0 + 60_000, false)).toBe(true);
+  });
   it("reports the installer's own last lines as the reason", () => {
     expect(failureReason("a\nb\n\ncurl: (6) Could not resolve host\n", 1)).toBe("a | b | curl: (6) Could not resolve host");
     expect(failureReason("", null)).toBe("the installer stopped unexpectedly");
