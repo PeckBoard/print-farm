@@ -11,8 +11,10 @@ import { parseSliceInfo, Filament, AmsState, SpoolMatch, autoMatch, explicitMatc
 
 /// argv: <file.gcode.3mf>. Prints Metadata/slice_info.config (nothing when absent).
 export const READ_SLICE_INFO =
-  'if command -v unzip >/dev/null 2>&1; then unzip -p \"$1\" Metadata/slice_info.config 2>/dev/null; ' +
-  'elif command -v python3 >/dev/null 2>&1; then python3 -c \"import sys,zipfile; sys.stdout.write(zipfile.ZipFile(sys.argv[1]).read(\'Metadata/slice_info.config\').decode(\'utf-8\', \'replace\'))\" \"$1\" 2>/dev/null; fi; true';
+  'if command -v unzip >/dev/null 2>&1; then unzip -p "$1" Metadata/slice_info.config 2>/dev/null; ' +
+  'elif command -v python3 >/dev/null 2>&1; then python3 -c ' +
+  '\'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); n="Metadata/slice_info.config"; ' +
+  'sys.stdout.write(z.read(n).decode("utf-8", "replace") if n in z.namelist() else "")\' "$1" 2>/dev/null; fi; true';
 
 /// Filaments per plate from a .gcode.3mf's slice_info (empty when unreadable).
 export function readFilaments(path: string): Record<string, Filament[]> {

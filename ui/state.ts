@@ -1,6 +1,7 @@
 // Shared page state + API types (see README "UI API").
 
 import { get } from "./api";
+import { FarmSettings, ProfileListItem, SliceEffective, withFarmDefaults } from "./settingsModel";
 
 export interface Temp {
   actual: number;
@@ -62,6 +63,8 @@ export interface SliceJob {
   estimate?: Estimate;
   error?: string;
   log_tail?: string;
+  /// What actually reached the printer (read back from the G-code).
+  effective?: SliceEffective;
 }
 export interface Print {
   id: string;
@@ -169,7 +172,7 @@ export function orcaSetupMessage(): string | null {
 }
 
 let vendorsP: Promise<string[]> | null = null;
-const profileCache = new Map<string, Promise<string[]>>();
+const profileCache = new Map<string, Promise<ProfileListItem[]>>();
 
 export function loadVendors(force = false): Promise<string[]> {
   if (!vendorsP || force) {
@@ -180,14 +183,42 @@ export function loadVendors(force = false): Promise<string[]> {
 }
 
 export function loadProfiles(kind: "printer" | "filament" | "process", vendor: string): Promise<string[]> {
+  return loadProfileItems(kind, vendor).then((items) => items.map((x) => x.name));
+}
+
+/// Full list items (name, vendor, user, inherits, …) for a kind + vendor.
+/// User presets change under us (Profiles tab), so their list is rescanned.
+export function loadProfileItems(kind: "printer" | "filament" | "process", vendor: string): Promise<ProfileListItem[]> {
   const key = kind + "|" + vendor;
   let p = profileCache.get(key);
   if (!p) {
-    p = get<{ profiles: { name: string }[] }>(`profiles?kind=${kind}&vendor=${encodeURIComponent(vendor)}`).then((r) =>
-      (r.profiles || []).map((x) => x.name),
-    );
+    const refresh = vendor === "User" ? "&refresh=1" : "";
+    p = get<{ profiles: ProfileListItem[] }>(`profiles?kind=${kind}&vendor=${encodeURIComponent(vendor)}${refresh}`).then((r) => r.profiles || []);
     p.catch(() => profileCache.delete(key));
     profileCache.set(key, p);
   }
   return p;
+}
+
+/// Drop the cached User preset lists (one was created / renamed / deleted).
+export function resetUserProfiles(): void {
+  for (const k of Array.from(profileCache.keys())) if (k.endsWith("|User")) profileCache.delete(k);
+}
+
+// ── farm settings (GET farm-settings) ──────────────────────────────────────
+
+let farmP: Promise<FarmSettings> | null = null;
+
+/// Farm-wide defaults, cached; `force` refetches.
+export function loadFarmSettings(force = false): Promise<FarmSettings> {
+  if (!farmP || force) {
+    farmP = get<Partial<FarmSettings>>("farm-settings").then(withFarmDefaults);
+    farmP.catch(() => (farmP = null));
+  }
+  return farmP;
+}
+
+/// The Settings tab saved: later readers see the new values.
+export function setFarmSettings(s: FarmSettings): void {
+  farmP = Promise.resolve(s);
 }

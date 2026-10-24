@@ -63,7 +63,10 @@ export function parseControl(body: any, caps: Capabilities): ControlAction {
       const heater = body.heater;
       if (heater !== "nozzle" && heater !== "bed" && heater !== "chamber") throw bad("heater must be nozzle, bed or chamber");
       const cap = caps.temps[heater as "nozzle" | "bed" | "chamber"];
-      if (!cap) throw unsupported(`setting the ${heater} temperature`);
+      if (!cap) {
+        if (caps.temps_unsupported_reason) throw new DriverError(400, `setting the ${heater} temperature is not supported on this printer: ${caps.temps_unsupported_reason}`);
+        throw unsupported(`setting the ${heater} temperature`);
+      }
       const target = finite(body.target, "target");
       if (target < 0 || target > cap.max) throw bad(`${heater} target must be 0-${cap.max} °C`);
       return { action, heater, target: Math.round(target) };

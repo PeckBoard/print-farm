@@ -4,6 +4,7 @@
 // Auth: HTTP Digest (username default "maker" + the password from the
 // printer's settings screen) or, on older builds, X-Api-Key.
 
+import { execAny } from "../host";
 import { Transport, HttpReq, jsonBody, expectOk } from "../transport";
 import {
   PrinterDriver,
@@ -57,7 +58,30 @@ export function prusalinkStatus(status: any, job: any | null): PrinterStatus {
   return st;
 }
 
-export function prusalinkDriver(p: PrinterRecord, t: Transport): PrinterDriver {
+/// PrusaLink (MK4/XL/MINI/Core One firmware, API v1 and the legacy OctoPrint
+/// subset) has no endpoint that sets a temperature or runs G-code: heaters
+/// are only driven by a print or the printer's screen.
+export const PRUSALINK_NO_TEMPS =
+  "PrusaLink has no API to set heater temperatures (only the printer's screen or a running print can); " +
+  "preheat from the printer's menu";
+
+export const START_TIMEOUT_S = 60;
+export const START_POLLS = 12;
+export const START_POLL_S = 5;
+
+/// Does `/api/v1/job` describe this file? MK4 jobs carry the 8.3 `name` and
+/// the long `display_name`. Pure.
+export function jobIsFile(job: any, file: string): boolean {
+  const want = (file.split("/").pop() ?? "").toLowerCase();
+  const f = job?.file ?? {};
+  return [f.display_name, f.name].some((n) => typeof n === "string" && n.toLowerCase() === want);
+}
+
+function sleepSecs(s: number): void {
+  execAny("sleep", [String(s)], s + 5);
+}
+
+export function prusalinkDriver(p: PrinterRecord, t: Transport, wait: (secs: number) => void = sleepSecs): PrinterDriver {
   const base = baseUrl(p, 80);
   const storage = (p.storage || "usb").replace(/[^a-zA-Z0-9_-]/g, "");
   const auth: Partial<HttpReq> = p.password
@@ -80,6 +104,20 @@ export function prusalinkDriver(p: PrinterRecord, t: Transport): PrinterDriver {
     const id = num(jsonBody(r, "prusalink status").job?.id);
     if (id === null) throw new Error("no active job on this printer");
     return id;
+  };
+  /// Is the printer running (or just starting) `file`? Never throws.
+  const runningFile = (file: string): boolean => {
+    try {
+      const r = req({ method: "GET", path: "/api/v1/status", timeoutSecs: 10 });
+      if (r.status !== 200) return false;
+      const st = jsonBody(r, "prusalink status");
+      const state = String(st?.printer?.state ?? "").toUpperCase();
+      if (st?.job?.id === undefined || !["PRINTING", "PAUSED", "BUSY"].includes(state)) return false;
+      const jr = req({ method: "GET", path: "/api/v1/job", timeoutSecs: 10 });
+      return jr.status === 200 && jobIsFile(jsonBody(jr, "prusalink job"), file);
+    } catch (_e) {
+      return false;
+    }
   };
 
   return {
@@ -115,7 +153,28 @@ export function prusalinkDriver(p: PrinterRecord, t: Transport): PrinterDriver {
       );
     },
     start(file) {
-      expectOk(req({ method: "POST", path: `/api/v1/files/${storage}/${encPath(file)}`, timeoutSecs: 15 }), "prusalink start");
+      // The MK4 can take well over 15 s to answer a start (it reads the file
+      // first), and a timed-out start may still have gone through: wait
+      // longer, and on a slow or 5xx answer poll the job state for the file.
+      let why = "";
+      try {
+        const r = req({ method: "POST", path: `/api/v1/files/${storage}/${encPath(file)}`, timeoutSecs: START_TIMEOUT_S });
+        if (r.status >= 200 && r.status < 300) return;
+        if (r.status === 409 && runningFile(file)) return;
+        if (r.status < 500 && r.status !== 408) expectOk(r, "prusalink start");
+        why = `HTTP ${r.status}`;
+      } catch (e) {
+        if (/prusalink start failed: HTTP/.test((e as Error).message)) throw e;
+        why = (e as Error).message;
+      }
+      for (let i = 0; i < START_POLLS; i++) {
+        if (runningFile(file)) return;
+        wait(START_POLL_S);
+      }
+      if (runningFile(file)) return;
+      throw new Error(
+        `prusalink start: the printer didn't confirm the print started (${why}). It is still queued — check the printer, then retry the start.`,
+      );
     },
     pause() {
       expectOk(req({ method: "PUT", path: `/api/v1/job/${jobId()}/pause`, timeoutSecs: 15 }), "prusalink pause");
@@ -147,6 +206,7 @@ export function prusalinkDriver(p: PrinterRecord, t: Transport): PrinterDriver {
       caps.job = { pause: true, resume: true, stop: true, speed_levels: false, speed_percent: false };
       caps.files = true;
       caps.camera = true;
+      caps.temps_unsupported_reason = PRUSALINK_NO_TEMPS;
       return caps;
     },
     detail() {

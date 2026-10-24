@@ -64,6 +64,8 @@ export interface Capabilities {
   gcode: boolean;
   camera: boolean;
   errors: boolean;
+  /// Why setting a temperature isn't possible, when `temps` are all null.
+  temps_unsupported_reason?: string;
 }
 
 export interface PrinterError {
@@ -213,6 +215,9 @@ export interface PrinterRecord {
   orca_printer_profile?: string;
   orca_filament_profile?: string;
   orca_process_profile?: string;
+  /// Per-printer slicing settings (farmsettings.ts); presets are the
+  /// `orca_*_profile` fields above.
+  settings?: { plate_type?: string; nozzle_mm?: number };
 }
 
 export function emptyStatus(state: PrinterState, message: string | null = null): PrinterStatus {

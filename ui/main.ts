@@ -1,5 +1,6 @@
 // Print Farm page entry: header with the fleet summary, tabs (Farm / Slice /
-// Printers), and the three views. See README "UI API" for the routes.
+// Printers / Profiles / Settings), and the views. See README "UI API" and
+// FARM_SETTINGS_API.md for the routes.
 
 import { h, icon } from "./dom";
 import { state, OPEN_PRINTER } from "./state";
@@ -9,10 +10,15 @@ import { sliceView } from "./slice";
 import { setupWatch } from "./setup";
 import { openPrinterDetail, DetailHandle } from "./detail";
 import { injectDetailStyles } from "./detailStyles";
+import { injectSettingsStyles } from "./settingsStyles";
+import { profilesView } from "./profiles";
+import { settingsView } from "./settings";
 
 injectDetailStyles();
+injectSettingsStyles();
 
-type Tab = "farm" | "slice" | "printers";
+type Tab = "farm" | "slice" | "printers" | "profiles" | "settings";
+const TABS: Tab[] = ["farm", "slice", "printers", "profiles", "settings"];
 
 const app = document.getElementById("app")!;
 const summary = h("div", { class: "summary", "aria-live": "polite" });
@@ -21,21 +27,22 @@ const queueBadge = h("span", { class: "n" });
 queueBadge.hidden = true;
 
 const tablist = h("div", { class: "tabs", role: "tablist", "aria-label": "Print Farm sections" });
-const labels: [Tab, string, string][] = [
-  ["farm", "Farm", "printer"],
-  ["slice", "Slice", "layers"],
-  ["printers", "Printers", "edit"],
+const labels: [Tab, string][] = [
+  ["farm", "Farm"],
+  ["slice", "Slice"],
+  ["printers", "Printers"],
+  ["profiles", "Profiles"],
+  ["settings", "Settings"],
 ];
 for (const [id, label] of labels) {
   const b = h("button", { class: "tab", role: "tab", id: "tab-" + id, "aria-controls": "panel-" + id, "aria-selected": "false", tabindex: "-1", type: "button" }, label);
   if (id === "farm") b.appendChild(queueBadge);
   b.addEventListener("click", () => go(id));
   b.addEventListener("keydown", (e) => {
-    const order: Tab[] = ["farm", "slice", "printers"];
-    const i = order.indexOf(id);
+    const i = TABS.indexOf(id);
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
       e.preventDefault();
-      const next = order[(i + (e.key === "ArrowRight" ? 1 : order.length - 1)) % order.length];
+      const next = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
       go(next);
       tabs[next].focus();
     }
@@ -71,13 +78,17 @@ const slice = sliceView(
   },
   () => go("farm"),
 );
+const profiles = profilesView();
+const settings = settingsView();
 
 const panels: Record<Tab, HTMLElement> = {
   farm: h("div", { role: "tabpanel", id: "panel-farm", "aria-labelledby": "tab-farm" }, farm.el),
   slice: h("div", { role: "tabpanel", id: "panel-slice", "aria-labelledby": "tab-slice" }, slice.el),
   printers: h("div", { role: "tabpanel", id: "panel-printers", "aria-labelledby": "tab-printers" }, printers.el),
+  profiles: h("div", { role: "tabpanel", id: "panel-profiles", "aria-labelledby": "tab-profiles" }, profiles.el),
+  settings: h("div", { role: "tabpanel", id: "panel-settings", "aria-labelledby": "tab-settings" }, settings.el),
 };
-const main = h("main", null, setup.el, panels.farm, panels.slice, panels.printers);
+const main = h("main", null, setup.el, panels.farm, panels.slice, panels.printers, panels.profiles, panels.settings);
 app.append(header, main);
 
 let current: Tab | null = null;
@@ -100,6 +111,8 @@ function go(t: Tab) {
   }
   if (t === "farm") farm.show();
   else if (t === "slice") slice.show();
+  else if (t === "profiles") profiles.show();
+  else if (t === "settings") settings.show();
   else printers.show();
 }
 
@@ -144,6 +157,6 @@ window.addEventListener(OPEN_PRINTER, (e) => openDetail((e as CustomEvent<{ id: 
 const hash = location.hash.slice(1);
 const deepPrinter = hash.startsWith("printer/") ? decodeURIComponent(hash.slice(8)) : null;
 const initial = ((deepPrinter ? "farm" : hash) || new URLSearchParams(location.search).get("tab") || "farm") as Tab;
-go(["farm", "slice", "printers"].indexOf(initial) >= 0 ? initial : "farm");
+go(TABS.indexOf(initial) >= 0 ? initial : "farm");
 if (deepPrinter) openDetail(deepPrinter);
 setup.check();

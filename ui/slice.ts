@@ -9,6 +9,7 @@ import { fmtBytes, fmtDuration, fmtFilament, accepts, previewKind, TYPE_SHORT } 
 import { parseGcodeAsync, ParsedGcode, EMPTY_GCODE } from "./gcode";
 import { Viewer, ViewerTheme, webglAvailable } from "./viewer";
 import { profilePicker, ProfilePicker } from "./profilePicker";
+import { sliceOverrides, effectiveBlock } from "./sliceOverrides";
 import { unzipSync } from "three/examples/jsm/libs/fflate.module.js";
 import { parse3mf, plateThumbnail, Parsed3mf } from "./threemf";
 
@@ -595,7 +596,8 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
           : withDefaults.length === 1
             ? withDefaults[0].id
             : "";
-    const prSel = select("pf-slice-printer", printerOpts, lastPrinter);
+    // Not "pf-slice-printer": that's the picker's printer-profile combobox.
+    const prSel = select("pf-slice-dest", printerOpts, lastPrinter);
     const init = (pid: string) => {
       const p = printerById(pid);
       return {
@@ -613,19 +615,32 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       picker.set(init(lastPrinter));
     }
     const pk = picker;
+    const ov = sliceOverrides(lastPrinter, () => validate());
     prSel.addEventListener("change", () => {
       const p = printerById(prSel.value);
       if (p) pk.set({ printer: p.orca_printer_profile || pk.values().printer, filament: p.orca_filament_profile || pk.values().filament, process: p.orca_process_profile || pk.values().process });
+      ov.setPrinter(prSel.value);
       validate();
     });
     const arrange = h("input", { type: "checkbox", id: "pf-arrange", checked: true }) as HTMLInputElement;
     const orient = h("input", { type: "checkbox", id: "pf-orient" }) as HTMLInputElement;
+    // Farm defaults, unless the user already flipped them.
+    let flipped = false;
+    arrange.addEventListener("change", () => (flipped = true));
+    orient.addEventListener("change", () => (flipped = true));
+    ov.farm().then((fs) => {
+      if (!fs || flipped) return;
+      arrange.checked = fs.auto_arrange;
+      orient.checked = fs.auto_orient;
+    });
     const sliceBtn = btn("Slice", { cls: "primary", icon: "slice" });
     const reason = h("span", { class: "reason" });
     formHost.append(
-      field("Printer", prSel, { forId: "pf-slice-printer", hint: "Picks the output format and fills in the printer's default profiles." }).el,
+      field("Printer", prSel, { forId: "pf-slice-dest", hint: "Picks the output format and fills in the printer's default profiles." }).el,
       pk.el,
+      ov.plateEl,
       h("div", { class: "row" }, h("label", { class: "check", for: "pf-arrange" }, arrange, "Auto-arrange on the plate"), h("label", { class: "check", for: "pf-orient" }, orient, "Auto-orient")),
+      ov.el,
       h("div", { class: "row" }, sliceBtn, reason),
     );
 
@@ -642,6 +657,10 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       else if (!f.complete) why = "The upload didn't finish.";
       const running = latestJob(f.id)?.status === "running";
       if (running) why = "A slice is already running for this model.";
+      if (!why) {
+        const ob = ov.body();
+        if (!ob.ok) why = ob.error;
+      }
       sliceBtn.disabled = !!why;
       reason.textContent = why;
     }
@@ -650,6 +669,11 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
 
     sliceBtn.onclick = async () => {
       const v = pk.values();
+      const extra = ov.body();
+      if (!extra.ok) {
+        reason.textContent = extra.error;
+        return;
+      }
       sliceBtn.disabled = true;
       reason.textContent = "Starting…";
       try {
@@ -662,6 +686,7 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
           process_profile: v.process,
           arrange: arrange.checked,
           orient: orient.checked,
+          ...extra.fields,
         });
         state.jobs.unshift(r.job);
         renderJob(r.job);
@@ -717,6 +742,7 @@ export function sliceView(goPrinters: () => void, goFarm: () => void): SliceView
       } else {
         const out = state.files.find((x) => x.id === j.result_file_id);
         jobHost.append(h("div", { class: "row" }, h("span", { class: "pill ok", text: "Sliced" }), h("span", { text: out ? out.name : j.result_file_id || "" })));
+        if (j.effective) jobHost.appendChild(effectiveBlock(j.effective));
         if (j.estimate) jobHost.appendChild(estimateTiles(j.estimate));
         if (out) {
           jobHost.append(

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { prusalinkDriver } from "../src/drivers/prusalink";
+import { parseControl } from "../src/control";
 import { FakeTransport, json } from "./fakeTransport";
 import { PrinterRecord } from "../src/drivers/types";
 
@@ -76,4 +77,47 @@ describe("prusalink", () => {
     const t = new FakeTransport([["GET /api/v1/status", json({ printer: { state: "IDLE" } })]]);
     expect(() => prusalinkDriver(P, t).pause()).toThrow(/no active job/);
   });
+
+describe("prusalink start", () => {
+  const PRINTING = { job: { id: 5 }, printer: { state: "PRINTING" } };
+  const JOB5 = { id: 5, file: { name: "PART~1.BGC", display_name: "part.bgcode" } };
+
+  it("waits up to 60 s for the start answer", () => {
+    const t = new FakeTransport([["POST /api/v1/files/usb/part.bgcode", { status: 204 }]]);
+    prusalinkDriver(P, t, () => {}).start("part.bgcode");
+    expect(t.calls[0].timeoutSecs).toBe(60);
+  });
+
+  it("treats a timed-out start as started once the printer runs the file", () => {
+    let polls = 0;
+    const t = new FakeTransport([
+      ["POST /api/v1/files/usb/", new Error("request to http://192.168.1.50/api/v1/files/usb/part.bgcode timed out")],
+      ["GET /api/v1/status", () => (++polls < 3 ? json({ printer: { state: "BUSY" } }) : json(PRINTING))],
+      ["GET /api/v1/job", json(JOB5)],
+    ]);
+    const waits: number[] = [];
+    prusalinkDriver(P, t, (s) => waits.push(s)).start("part.bgcode");
+    expect(waits).toEqual([5, 5]);
+  });
+
+  it("fails without consuming anything when the printer never confirms", () => {
+    const t = new FakeTransport([
+      ["POST /api/v1/files/usb/", { status: 503 }],
+      ["GET /api/v1/status", json({ printer: { state: "IDLE" } })],
+    ]);
+    expect(() => prusalinkDriver(P, t, () => {}).start("part.bgcode")).toThrow(/didn't confirm .*HTTP 503.*still queued/);
+  });
+
+  it("fails at once on a definite refusal", () => {
+    const t = new FakeTransport([["POST /api/v1/files/usb/", { status: 404, body: "no such file" }]]);
+    expect(() => prusalinkDriver(P, t, () => {}).start("part.bgcode")).toThrow(/prusalink start failed: HTTP 404/);
+    expect(t.calls.length).toBe(1);
+  });
+
+  it("can't set temperatures and says why", () => {
+    const caps = prusalinkDriver(P, new FakeTransport([])).capabilities();
+    expect(caps.temps).toEqual({ nozzle: null, bed: null, chamber: null });
+    expect(() => parseControl({ action: "temp", heater: "bed", target: 60 }, caps)).toThrow(/PrusaLink has no API to set heater temperatures/);
+  });
+});
 });

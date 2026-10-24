@@ -66,6 +66,7 @@ const P: Record<string, string> = {
   camera: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
   sliders: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
 };
 
 export function icon(name: string): SVGElement {
@@ -212,11 +213,12 @@ export interface Combo {
 
 /// Searchable single-select combobox. The value is always one of the options
 /// (or "") — typed text that matches nothing reverts on blur.
-export function combobox(o: { id: string; placeholder?: string; options?: string[]; value?: string; onChange?: (v: string) => void; allowEmpty?: boolean }): Combo {
+export function combobox(o: { id: string; placeholder?: string; options?: string[]; value?: string; onChange?: (v: string) => void; allowEmpty?: boolean; emptyLabel?: string }): Combo {
   let options = o.options || [];
   let value = o.value || "";
   let open = false;
   let hi = -1;
+  let seekCurrent = false;
   let shown: string[] = [];
   const listId = o.id + "-list";
   const input = h("input", {
@@ -250,7 +252,15 @@ export function combobox(o: { id: string; placeholder?: string; options?: string
   const render = (q: string) => {
     clear(list);
     shown = (q && q !== value ? options.filter((x) => matchesQuery(x, q)) : options).slice(0, 300);
+    // The current value stays reachable even past the cap (User presets sit
+    // after a vendor's few hundred system ones).
+    if (value && shown.indexOf(value) < 0 && options.indexOf(value) >= 0 && (!q || q === value || matchesQuery(value, q))) shown.push(value);
     if (o.allowEmpty && !q) shown = [""].concat(shown);
+    // Opening highlights the current value where it actually sits.
+    if (seekCurrent) {
+      seekCurrent = false;
+      hi = Math.max(0, shown.indexOf(value));
+    }
     if (!shown.length) list.appendChild(h("div", { class: "none", text: options.length ? "No matches" : "No options" }));
     shown.forEach((opt, i) => {
       const d = h("div", {
@@ -258,7 +268,7 @@ export function combobox(o: { id: string; placeholder?: string; options?: string
         role: "option",
         id: listId + "-" + i,
         "aria-selected": i === hi ? "true" : "false",
-        text: opt || "— none —",
+        text: opt || o.emptyLabel || "— none —",
       });
       d.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -277,7 +287,7 @@ export function combobox(o: { id: string; placeholder?: string; options?: string
       open = true;
       document.body.appendChild(list);
       input.setAttribute("aria-expanded", "true");
-      hi = Math.max(0, options.indexOf(value));
+      seekCurrent = true;
     }
     place();
     render(input.value);

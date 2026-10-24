@@ -13,7 +13,7 @@ import { storeGet, storePut, storeList } from "./host";
 import { nextSeq } from "./counter";
 import { requireFile, listFiles, FileRecord, FileKind } from "./storage";
 import { withSpools } from "./spools";
-import { PrinterRecord, PrinterType, StartOptions } from "./drivers/types";
+import { PrinterRecord, PrinterStatus, PrinterType, StartOptions } from "./drivers/types";
 import { driverFor } from "./drivers";
 import { defaultTransport } from "./transport";
 import { bridgeConfig } from "./config";
@@ -37,6 +37,9 @@ export interface PrintJob {
   /// Agent confirmations: the ask_user token (never shown to the UI).
   token?: string;
   error?: string;
+  /// The last start attempt failed (timeout / no confirmation) — the print
+  /// stays queued and a retry checks whether it started after all.
+  start_error?: string;
 }
 
 // ── pure ────────────────────────────────────────────────────────────────────
@@ -127,23 +130,43 @@ export function uploadForPrint(printer: PrinterRecord, fileId: string, by: "ui" 
   return job;
 }
 
+/// Is the printer already running this file? (A start that timed out may have
+/// gone through.) Matches by base name, ignoring case and the G-code
+/// extension. Pure — tested.
+export function alreadyRunning(st: PrinterStatus, remoteName: string): boolean {
+  if ((st.state !== "printing" && st.state !== "paused") || !st.file) return false;
+  const norm = (s: string) =>
+    (s.split("/").pop() ?? "").toLowerCase().replace(/\.(gcode\.3mf|bgcode|gcode|gco|3mf)$/, "");
+  return norm(st.file) === norm(remoteName);
+}
+
+function markStarted(job: PrintJob): PrintJob {
+  const started: PrintJob = { ...job, status: "started" };
+  delete started.token;
+  delete started.error;
+  delete started.start_error;
+  putPrint(started);
+  return started;
+}
+
 /// Start an uploaded print. Callers must have established human intent: a UI
-/// request (user authority) or a verified ask_user answer.
+/// request (user authority) or a verified ask_user answer. A failed start
+/// (a timeout, an unconfirmed answer) leaves the print queued with its
+/// confirmation token and `error` set, so the same confirmation can retry;
+/// a retry first checks whether the earlier attempt started it after all.
 export function startPrint(printer: PrinterRecord, job: PrintJob): PrintJob {
   if (job.status === "started") throw new Error(`print ${job.id} was already started`);
   if (job.status === "failed" || job.status === "declined") throw new Error(`print ${job.id} is ${job.status}; queue a new one`);
+  const d = driverFor(printer, defaultTransport, bridgeConfig());
+  if (job.start_error && alreadyRunning(d.status(), job.remote_name)) return markStarted(job);
   try {
-    driverFor(printer, defaultTransport, bridgeConfig()).start(job.remote_name, job.options);
+    d.start(job.remote_name, job.options);
   } catch (e) {
-    const failed: PrintJob = { ...job, status: "failed", error: (e as Error).message };
-    delete failed.token;
-    putPrint(failed);
+    const msg = (e as Error).message;
+    putPrint({ ...job, error: msg, start_error: msg });
     throw e;
   }
-  const started: PrintJob = { ...job, status: "started" };
-  delete started.token;
-  putPrint(started);
-  return started;
+  return markStarted(job);
 }
 
 /// The user chose not to start a queued print (page "Dismiss"). The file stays

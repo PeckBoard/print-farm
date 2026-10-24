@@ -24,6 +24,7 @@ export interface RedactedPrinter {
   orca_printer_profile?: string;
   orca_filament_profile?: string;
   orca_process_profile?: string;
+  settings?: { plate_type?: string; nozzle_mm?: number };
 }
 
 export function redact(p: PrinterRecord): RedactedPrinter {
@@ -47,6 +48,7 @@ export function redact(p: PrinterRecord): RedactedPrinter {
   for (const k of ["orca_printer_profile", "orca_filament_profile", "orca_process_profile"] as const) {
     if (p[k]) out[k] = p[k];
   }
+  if (p.settings) out.settings = { ...p.settings };
   return out;
 }
 
@@ -103,6 +105,7 @@ export function buildPrinter(input: any, existing: PrinterRecord | null, idf: ()
     if (v) rec[k] = v;
   }
 
+  if (existing?.settings) rec.settings = { ...existing.settings };
   if (type === "bambu") {
     const b = input.bambu ?? {};
     const prev = existing?.bambu;

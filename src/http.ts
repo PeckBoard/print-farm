@@ -35,6 +35,10 @@ import { startSlice, pollSlice, listJobs, orcaDiagnostics } from "./slice";
 import { uploadForPrint, startPrint, dismissPrint, listPrints, getPrint, publicJob, startPrinterFile } from "./prints";
 import { autoFill } from "./autoprofiles";
 import { ensureSetup, invalidateSetup, syncSerials, SetupName } from "./setup";
+import { ApiError } from "./apierror";
+import { getFarmSettings, setFarmSettings, applyPrinterSettings, printerSettingsView, withoutIgnoredHms } from "./farmsettings";
+import { getProfile, createProfile, updateProfile, deleteProfile } from "./userpresets";
+import { profileFields } from "./profilefields";
 import { planSpools, spoolChoices, withSpools } from "./spools";
 
 export const PAGE_PATH = "/plugin-api/v1/print-farm";
@@ -68,18 +72,24 @@ class HttpError extends Error {
   }
 }
 
-/// HTTP status for a thrown error: its own when it carries one, else 400.
-export function errorStatus(e: unknown): number {
-  return e instanceof HttpError || e instanceof DriverError ? e.status : 400;
+/// A handler result with a non-200 status (`POST profiles` → 201).
+class WithStatus {
+  constructor(public status: number, public body: unknown) {}
 }
 
-/// `{error, hint?, needs_developer_mode?}` for a thrown error. Pure.
-export function errorBody(e: unknown): { error: string; hint?: string; needs_developer_mode?: boolean } {
-  const out: { error: string; hint?: string; needs_developer_mode?: boolean } = { error: errMsg(e) };
+/// HTTP status for a thrown error: its own when it carries one, else 400.
+export function errorStatus(e: unknown): number {
+  return e instanceof HttpError || e instanceof DriverError || e instanceof ApiError ? e.status : 400;
+}
+
+/// `{error, hint?, needs_developer_mode?, field?, …}` for a thrown error. Pure.
+export function errorBody(e: unknown): { error: string; hint?: string; needs_developer_mode?: boolean; [k: string]: unknown } {
+  const out: { error: string; hint?: string; needs_developer_mode?: boolean; [k: string]: unknown } = { error: errMsg(e) };
   if (e instanceof DriverError) {
     if (e.hint) out.hint = e.hint;
     if (e.needs_developer_mode) out.needs_developer_mode = true;
   }
+  if (e instanceof ApiError) Object.assign(out, e.extra);
   return out;
 }
 
@@ -87,6 +97,10 @@ function printerOr404(id: string): PrinterRecord {
   const p = getPrinter(id);
   if (!p) throw new HttpError(404, `unknown printer '${id}'`);
   return p;
+}
+
+function settingsView(p: PrinterRecord) {
+  return printerSettingsView(p, getFarmSettings(), driver(p).capabilities());
 }
 
 function driver(p: PrinterRecord) {
@@ -186,7 +200,10 @@ export const ROUTES: Array<[string, Handler]> = [
   ],
   ["GET printers/:id/status", ({ params }) => ({ id: params.id, status: driver(printerOr404(params.id)).status() })],
   ["GET printers/:id/capabilities", ({ params }) => driver(printerOr404(params.id)).capabilities()],
-  ["GET printers/:id/detail", ({ params }) => driver(printerOr404(params.id)).detail()],
+  [
+    "GET printers/:id/detail",
+    ({ params }) => withoutIgnoredHms(driver(printerOr404(params.id)).detail(), getFarmSettings().monitoring.ignored_hms),
+  ],
   [
     "POST printers/:id/control",
     ({ params, body }) => {
@@ -254,11 +271,37 @@ export const ROUTES: Array<[string, Handler]> = [
       if (!kindRaw || !vendor) return { roots, vendors: listVendors(roots) };
       const kind = parseKind(kindRaw);
       const all = queryParam(query, "all") === "1";
-      const entries = scanProfiles(roots, vendor, kind, queryParam(query, "refresh") === "1")
-        .filter((e) => all || e.instantiable)
-        .map((e) => ({ name: e.name, vendor: e.vendor, inherits: e.inherits || null, instantiable: e.instantiable, source: e.source }))
+      const q = (queryParam(query, "q") ?? "").toLowerCase();
+      // User presets change outside Print Farm too (the Orca GUI): always rescan.
+      const refresh = queryParam(query, "refresh") === "1" || vendor === "User";
+      const entries = scanProfiles(roots, vendor, kind, refresh)
+        .filter((e) => (all || e.instantiable) && (!q || e.name.toLowerCase().includes(q)))
+        .map((e) => ({
+          name: e.name,
+          vendor: e.vendor,
+          inherits: e.inherits || null,
+          instantiable: e.instantiable,
+          source: e.source,
+          user: e.source === "user",
+        }))
         .sort((a, b) => a.name.localeCompare(b.name));
       return { kind, vendor, profiles: entries };
+    },
+  ],
+  ["GET profiles/fields", ({ query }) => ({ fields: profileFields(parseKind(queryParam(query, "kind"))) })],
+  ["GET profiles/:kind/:name", ({ params }) => getProfile(parseKind(params.kind), params.name)],
+  ["POST profiles", ({ body }) => new WithStatus(201, createProfile(parseKind(body?.kind), body))],
+  ["PUT profiles/:kind/:name", ({ params, body }) => updateProfile(parseKind(params.kind), params.name, body)],
+  ["DELETE profiles/:kind/:name", ({ params }) => deleteProfile(parseKind(params.kind), params.name)],
+  ["GET farm-settings", () => getFarmSettings()],
+  ["PUT farm-settings", ({ body }) => setFarmSettings(body)],
+  ["GET printers/:id/settings", ({ params }) => settingsView(printerOr404(params.id))],
+  [
+    "PUT printers/:id/settings",
+    ({ params, body }) => {
+      const p = applyPrinterSettings(printerOr404(params.id), body);
+      putPrinter(p);
+      return settingsView(p);
     },
   ],
   ["GET files", () => ({ files: listFiles() })],
@@ -386,7 +429,8 @@ export function serveAuthed(payload: any): string {
     for (const [decl, handler] of ROUTES) {
       const params = matchRoute(decl, method, rel);
       if (params) {
-        return jsonResponse(200, handler({ params, query: str(payload?.query), body: parseBody(str(payload?.body)) }));
+        const out = handler({ params, query: str(payload?.query), body: parseBody(str(payload?.body)) });
+        return out instanceof WithStatus ? jsonResponse(out.status, out.body) : jsonResponse(200, out);
       }
     }
   } catch (e) {

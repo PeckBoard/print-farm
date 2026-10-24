@@ -4,6 +4,7 @@
 import { version as VERSION } from "../package.json";
 import { uiRoutes, PAGE_PATH } from "./http";
 import { DEFAULT_BRIDGE_URL, DEFAULT_ORCA_PATH } from "./config";
+import { PLATE_TYPES } from "./farmsettings";
 
 const DESCRIPTION =
   "Print Farm: control a fleet of 3D printers — Klipper/Moonraker, OctoPrint, PrusaLink, and Bambu Lab " +
@@ -25,6 +26,7 @@ const ICON =
   '<rect x="6" y="14" width="12" height="8"/></svg>';
 
 const PRINTER_REF = "Printer id or name (see printer_list).";
+const KIND_PROP = { type: "string", enum: ["printer", "filament", "process"], description: "printer = Orca machine preset." };
 function printerOnly() {
   return {
     type: "object",
@@ -83,25 +85,113 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: "profile_get",
+    description:
+      "One OrcaSlicer preset: its own settings (`own`, Orca's on-disk shapes), every setting after its inherits " +
+      "chain (`resolved`), vendor, whether it is a User preset, and the file path.",
+    input_schema: {
+      type: "object",
+      properties: { kind: KIND_PROP, name: { type: "string", description: "Preset name (see profile_list)." } },
+      required: ["kind", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "profile_save",
+    description:
+      "Create or update an OrcaSlicer User preset (system presets are read-only — save under a new name to " +
+      "duplicate one). New: name + inherits (the preset to start from) + own (the settings that differ, e.g. " +
+      "{\"textured_plate_temp\": \"60\", \"textured_plate_temp_initial_layer\": \"60\"}). Existing User preset: own " +
+      "REPLACES its stored overrides; new_name renames it. Written where the Orca GUI keeps user presets, so " +
+      "it shows up there too.",
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: KIND_PROP,
+        name: { type: "string" },
+        inherits: { type: "string", description: "Parent preset name (a system preset, or a User preset to copy)." },
+        own: { type: "object", description: "Orca setting name → value (string, number, boolean or list)." },
+        new_name: { type: "string", description: "Rename an existing User preset." },
+      },
+      required: ["kind", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "profile_delete",
+    description: "Delete an OrcaSlicer User preset (system presets can't be deleted).",
+    input_schema: {
+      type: "object",
+      properties: { kind: KIND_PROP, name: { type: "string" } },
+      required: ["kind", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "farm_settings_get",
+    description:
+      "Farm-wide defaults: plate_type (bed type every slice uses unless the printer or call overrides it), " +
+      "material, quality, brim, auto_arrange/auto_orient, bed_temp_override, confirm_before_start, and monitoring " +
+      "(snapshot interval, ignored HMS codes, auto-pause flag).",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "farm_settings_set",
+    description: "Change farm-wide defaults (partial; same shape as farm_settings_get). Returns the new settings.",
+    input_schema: {
+      type: "object",
+      properties: { settings: { type: "object", description: "Partial farm settings, e.g. {\"plate_type\": \"Textured PEI Plate\"}." } },
+      required: ["settings"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "printer_settings_set",
+    description:
+      "Per-printer slicing settings (partial): plate_type, printer_preset, process_preset, filament_preset, " +
+      "nozzle_mm (0.2/0.4/0.6/0.8). null clears a value (falls back to the farm setting / auto-detected preset). " +
+      "Returns the settings with the effective values.",
+    input_schema: {
+      type: "object",
+      properties: {
+        printer: { type: "string", description: PRINTER_REF },
+        settings: { type: "object" },
+      },
+      required: ["printer", "settings"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "slice_model",
     description:
       "Slice a 3D model (STL/3MF/STEP/OBJ) with OrcaSlicer into G-code (or .gcode.3mf for Bambu printers). " +
       "Give the model as `path` (relative to the project folder) or `file_id` (an uploaded file). Profiles " +
       "are Orca preset names (see profile_list); omitted ones fall back to the defaults saved on `printer`. " +
-      "Runs in the background — returns a job_id; poll slice_status. The result is a file_id usable with " +
-      "print_upload / print_start, with estimated print time and filament use.",
+      "Every other value resolves call argument → printer settings → farm settings → preset: the plate type " +
+      "(always passed to Orca, so the filament's bed temperature for that plate applies), brim, bed temperature " +
+      "overrides, arrange/orient. Runs in the background — returns a job_id; poll slice_status. The result is " +
+      "a file_id usable with print_upload / print_start, with estimated print time and filament use.",
     input_schema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Model path relative to the project folder." },
         file_id: { type: "string", description: "Id of an already uploaded model file." },
-        printer: { type: "string", description: PRINTER_REF + " Supplies default profiles and the output format." },
+        printer: { type: "string", description: PRINTER_REF + " Supplies default profiles, plate type and the output format." },
         printer_profile: { type: "string", description: "Orca printer (machine) preset name." },
         filament_profile: { type: "string", description: "Orca filament preset name." },
         process_profile: { type: "string", description: "Orca process preset name." },
         vendor: { type: "string", description: "Vendor to look the presets up under first (e.g. BBL)." },
-        arrange: { type: "boolean", description: "Auto-arrange on the plate (default true)." },
-        orient: { type: "boolean", description: "Auto-orient the model (default false)." },
+        bed_type: { type: "string", enum: [...PLATE_TYPES], description: "Build plate (Orca curr_bed_type)." },
+        brim_width: { type: "number", description: "Brim width in mm (0 = no brim). Default: the farm brim setting." },
+        bed_temp: {
+          type: "object",
+          description: "Bed temperature °C override for the chosen plate. Default: the filament preset's.",
+          properties: { first_layer: { type: "integer" }, other_layers: { type: "integer" } },
+          additionalProperties: false,
+        },
+        overrides: { type: "object", description: "Any Orca setting → value, e.g. {\"wall_loops\": \"3\"}." },
+        arrange: { type: "boolean", description: "Auto-arrange on the plate (default: farm auto_arrange)." },
+        orient: { type: "boolean", description: "Auto-orient the model (default: farm auto_orient)." },
       },
       additionalProperties: false,
     },
@@ -110,7 +200,8 @@ const MCP_TOOLS = [
     name: "slice_status",
     description:
       "Poll a slice job from slice_model: status running/succeeded/failed, the result file_id and the " +
-      "estimate (print_time_s, filament_g, filament_mm, layers) when done, or the error and log tail.",
+      "estimate (print_time_s, filament_g, filament_mm, layers) when done, `effective` (bed type, bed/nozzle " +
+      "temperatures first/other layers, brim, presets — read back from the produced G-code), or the error and log tail.",
     input_schema: {
       type: "object",
       properties: { job_id: { type: "string" } },
@@ -223,7 +314,9 @@ const MCP_TOOLS = [
   },
   {
     name: "printer_set_temperature",
-    description: "Set a heater target in °C (0 = off). Limits come from printer_capabilities.",
+    description:
+      "Set a heater target in °C (0 = off). Limits come from printer_capabilities. Not available on PrusaLink " +
+      "printers (their API has no temperature control).",
     input_schema: {
       type: "object",
       properties: {

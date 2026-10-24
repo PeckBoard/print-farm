@@ -17,7 +17,7 @@
 
 import { sh } from "./storage";
 import { orcaPath, orcaProfilesDir } from "./config";
-import { storeGet, storePut } from "./host";
+import { storeGet, storePut, storeDelete } from "./host";
 
 export type ProfileKind = "printer" | "filament" | "process";
 export const KIND_DIR: Record<ProfileKind, string> = { printer: "machine", filament: "filament", process: "process" };
@@ -362,9 +362,11 @@ export function scanProfiles(roots: ProfileRoot[], vendor: string, kind: Profile
     }
   }
   entries = entries.filter((e) => !e.type || e.type === KIND_TYPE[kind]);
-  // Never cache an empty scan: it would outlive the install that fills it.
+  // Never cache an empty scan: it would outlive the install that fills it
+  // (and drop a cached one: the last user preset of a kind was deleted).
   const doc = { roots: rootsSig(roots), entries };
   if (entries.length && JSON.stringify(doc).length < CACHE_MAX) storePut(INDEX, key, doc);
+  else if (!entries.length) storeDelete(INDEX, key);
   return entries;
 }
 
@@ -392,7 +394,7 @@ export function listMachineFiles(roots: ProfileRoot[]): { vendor: string; name: 
   return out;
 }
 
-function readJson(path: string): Record<string, unknown> {
+export function readJson(path: string): Record<string, unknown> {
   const text = sh('cat -- "$1"', [path], 30);
   try {
     return JSON.parse(text);
@@ -403,7 +405,7 @@ function readJson(path: string): Record<string, unknown> {
 
 /// Find a preset file by name anywhere in the system roots (slow path for a
 /// parent we didn't find in the likely vendors).
-function grepByName(roots: ProfileRoot[], name: string, kind: ProfileKind): ProfileEntry | null {
+export function grepByName(roots: ProfileRoot[], name: string, kind: ProfileKind): ProfileEntry | null {
   for (const r of roots) {
     const out = sh(
       'cd "$1" && grep -rlF --include="*.json" -- "\\"$2\\"" . 2>/dev/null | while read -r f; do ' +

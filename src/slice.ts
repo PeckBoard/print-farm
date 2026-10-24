@@ -23,13 +23,24 @@
 import { storeGet, storePut, storeList, storePutIfAbsent } from "./host";
 import { nextSeq } from "./counter";
 import { orcaPath, orcaHeadless, DEFAULT_ORCA_PATH } from "./config";
-import { sh, storageDir, requireFile, newFileRecord, putFile, headTail, FileRecord, writeText, JOB_HEARTBEAT, JOB_ALIVE } from "./storage";
-import { parseGcodeEstimate, GcodeEstimate } from "./gcode";
+import { sh, storageDir, requireFile, newFileRecord, putFile, FileRecord, writeText, JOB_HEARTBEAT, JOB_ALIVE } from "./storage";
+import { parseGcodeEstimate, GcodeEstimate, parseEffective, EffectiveSettings, EFFECTIVE_AWK } from "./gcode";
 import { resolveProfile, isBambuMachine, makeCliCompatible } from "./profiles";
 import { sliceableModel } from "./threemf";
 import { getPrinter } from "./printers";
 import { readFilaments } from "./spools";
 import { normColor } from "./ams";
+import { presetDefaults } from "./autoprofiles";
+import {
+  getFarmSettings,
+  resolveSlice,
+  withNozzle,
+  farmPresetCandidates,
+  PLATE_TEMP_KEY,
+  ResolvedSlice,
+  SliceOptions,
+  PresetValue,
+} from "./farmsettings";
 
 /// First element of a preset value (`["PLA"]` or `"PLA"`), trimmed.
 function first(v: unknown): string {
@@ -56,6 +67,25 @@ export interface SliceJob {
   filament?: { type: string; color: string };
   error?: string;
   log_tail?: string;
+  /// What was asked for after resolution (call → printer → farm).
+  requested?: ResolvedSlice;
+  /// What the produced G-code actually says (see effectiveBlock).
+  effective?: SliceEffective;
+}
+
+export interface SliceEffective {
+  bed_type: string | null;
+  bed_temp_first_layer: number | null;
+  bed_temp_other_layers: number | null;
+  nozzle_temp_first_layer: number | null;
+  nozzle_temp_other_layers: number | null;
+  brim_width: number | null;
+  brim_type: string | null;
+  printer_preset: string;
+  process_preset: string;
+  filament_preset: string;
+  /// "gcode" = read back from the output; "requested" = it couldn't be read.
+  source: "gcode" | "requested";
 }
 
 // ── pure ────────────────────────────────────────────────────────────────────
@@ -233,7 +263,7 @@ function putJob(j: SliceJob): void {
   storePut(JOBS, j.id, j);
 }
 
-export interface SliceRequest {
+export interface SliceRequest extends SliceOptions {
   file_id: string;
   printer_id?: string;
   printer_profile?: string;
@@ -241,8 +271,35 @@ export interface SliceRequest {
   process_profile?: string;
   vendor?: string;
   target?: SliceTarget;
-  arrange?: boolean;
-  orient?: boolean;
+}
+
+type Presets = { machine: Record<string, unknown>; process: Record<string, unknown>; filament: Record<string, unknown> };
+
+/// Write the resolved values into the flattened presets: `curr_bed_type` on
+/// the process (the CLI reads it from --load-settings, and the filament's
+/// per-plate bed temperature follows it), brim on the process, bed
+/// temperature overrides on the filament's keys for that plate, and each
+/// override on the preset that owns the key (process when none does), in
+/// that preset's shape. Pure — tested.
+export function applyResolved(p: Presets, r: ResolvedSlice): Presets {
+  const out: Presets = { machine: { ...p.machine }, process: { ...p.process }, filament: { ...p.filament } };
+  const shaped = (target: Record<string, unknown>, key: string, v: PresetValue) => {
+    const cur = target[key];
+    target[key] = Array.isArray(cur) && !Array.isArray(v) ? (cur.length > 1 ? cur.map(() => v) : [v]) : v;
+  };
+  out.process.curr_bed_type = r.bed_type;
+  if (r.brim) {
+    out.process.brim_type = r.brim.type;
+    out.process.brim_width = String(r.brim.width);
+  }
+  const plate = PLATE_TEMP_KEY[r.bed_type];
+  if (plate && r.bed_temp.first_layer !== null) shaped(out.filament, `${plate}_initial_layer`, String(r.bed_temp.first_layer));
+  if (plate && r.bed_temp.other_layers !== null) shaped(out.filament, plate, String(r.bed_temp.other_layers));
+  for (const [k, v] of Object.entries(r.overrides)) {
+    const target = k in out.process ? out.process : k in out.filament ? out.filament : k in out.machine ? out.machine : out.process;
+    shaped(target, k, v);
+  }
+  return out;
 }
 
 /// Is there a display, or a usable xvfb-run? Returns the argv prefix.
@@ -265,6 +322,19 @@ const LAUNCH = [
   'echo $!',
 ].join("\n");
 
+/// Resolve a preset from candidates (farm fallbacks): the first that exists.
+function firstResolving(names: string[], kind: "process" | "filament", vendor?: string) {
+  let err: unknown = null;
+  for (const n of names) {
+    try {
+      return { name: n, ...resolveProfile(n, kind, vendor) };
+    } catch (e) {
+      err = err ?? e;
+    }
+  }
+  throw err ?? new Error(`${kind}_profile is required (or set a default on the printer)`);
+}
+
 export function startSlice(req: SliceRequest): SliceJob {
   const model = requireFile(req.file_id);
   if (!model.complete) throw new Error(`file ${model.id} is still uploading`);
@@ -272,26 +342,31 @@ export function startSlice(req: SliceRequest): SliceJob {
 
   const printer = req.printer_id ? getPrinter(req.printer_id) : null;
   if (req.printer_id && !printer) throw new Error(`unknown printer '${req.printer_id}'`);
+  const farm = getFarmSettings();
+  const resolved = resolveSlice(req, printer, farm);
   const names = {
-    printer: req.printer_profile || printer?.orca_printer_profile || "",
+    printer: req.printer_profile || withNozzle(printer?.orca_printer_profile ?? "", printer?.settings?.nozzle_mm),
     filament: req.filament_profile || printer?.orca_filament_profile || "",
     process: req.process_profile || printer?.orca_process_profile || "",
   };
-  for (const [k, v] of Object.entries(names)) {
-    if (!v) throw new Error(`${k}_profile is required (or set a default on the printer)`);
-  }
+  if (!names.printer) throw new Error("printer_profile is required (or set a default on the printer)");
 
   const machine = resolveProfile(names.printer, "printer", req.vendor);
   const vendor = req.vendor || machine.vendor || undefined;
-  const process = resolveProfile(names.process, "process", vendor);
-  const filament = resolveProfile(names.filament, "filament", vendor);
+  // Neither the call nor the printer names one: the farm's quality/material
+  // applied to the machine preset's own defaults.
+  const fallback = farmPresetCandidates(presetDefaults(machine.profile), farm);
+  const process = firstResolving(names.process ? [names.process] : fallback.process, "process", vendor);
+  const filament = firstResolving(names.filament ? [names.filament] : fallback.filament, "filament", vendor);
+  names.process = process.name;
+  names.filament = filament.name;
   const target: SliceTarget =
     req.target ?? (printer?.type === "bambu" || isBambuMachine(machine.profile, machine.vendor) ? "gcode.3mf" : "gcode");
 
   const id = "j" + nextSeq("slice_seq");
   const dir = `${storageDir()}/jobs/${id}`;
   sh('mkdir -p "$1/out"', [dir]);
-  const presets = makeCliCompatible(machine.profile, process.profile, filament.profile);
+  const presets = applyResolved(makeCliCompatible(machine.profile, process.profile, filament.profile), resolved);
   writeText(`${dir}/printer.json`, JSON.stringify(presets.machine, null, 2));
   writeText(`${dir}/process.json`, JSON.stringify(presets.process, null, 2));
   writeText(`${dir}/filament.json`, JSON.stringify(presets.filament, null, 2));
@@ -299,7 +374,7 @@ export function startSlice(req: SliceRequest): SliceJob {
 
   const command = [
     ...headlessPrefix(),
-    ...buildOrcaArgs({ orca: findOrca()?.argv ?? orcaPath(), modelPath, jobDir: dir, target, arrange: req.arrange, orient: req.orient }),
+    ...buildOrcaArgs({ orca: findOrca()?.argv ?? orcaPath(), modelPath, jobDir: dir, target, arrange: resolved.arrange, orient: resolved.orient }),
   ];
   const pid = Number(sh(LAUNCH, [dir, ...command], 30).trim());
   const job: SliceJob = {
@@ -311,6 +386,7 @@ export function startSlice(req: SliceRequest): SliceJob {
     dir,
     pid: isFinite(pid) ? pid : 0,
     command,
+    requested: resolved,
   };
   if (printer) job.printer_id = printer.id;
   const ft = first(presets.filament.filament_type);
@@ -349,7 +425,8 @@ export function pollSlice(id: string): SliceJob {
     const src = `${job.dir}/out/${outcome.output}`;
     const size = sh('mv -- "$1" "$2" && wc -c < "$2"', [src, rec.path], 60).trim();
     const done: FileRecord = { ...rec, size: Number(size) || 0, complete: true, slice_job: job.id };
-    done.estimate = estimateFor(done, `${job.dir}/out`);
+    const back = readBack(done, `${job.dir}/out`);
+    if (back.estimate) done.estimate = back.estimate;
     if (job.target === "gcode.3mf") {
       const fil = readFilaments(done.path);
       if (Object.keys(fil).length) done.filaments = fil;
@@ -358,26 +435,57 @@ export function pollSlice(id: string): SliceJob {
     putFile(done);
     next.result_file_id = done.id;
     next.estimate = done.estimate;
+    next.effective = effectiveBlock(back.effective, job);
   }
   putJob(next);
   return next;
 }
 
-function estimateFor(f: FileRecord, outDir: string): GcodeEstimate | undefined {
+/// Python fallback for `unzip -p <zip> <member>` (argv: zip, member). Passed
+/// as its own argument: quoting it inside the sh script broke it before.
+export const PY_UNZIP = "import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))";
+
+/// Estimate + effective settings from a finished slice's G-code (for a
+/// .gcode.3mf, the plate G-code is extracted first). One exec.
+function readBack(f: FileRecord, outDir: string): { estimate?: GcodeEstimate; effective?: EffectiveSettings } {
   try {
-    if (f.kind === "gcode") return parseGcodeEstimate(headTail(f.path));
-    // .gcode.3mf: the G-code is embedded at Metadata/plate_1.gcode.
     const text = sh(
-      'if command -v unzip >/dev/null 2>&1; then unzip -p "$1" Metadata/plate_1.gcode > "$2/plate.tmp" 2>/dev/null; ' +
-        'elif command -v python3 >/dev/null 2>&1; then python3 -c "import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(\'Metadata/plate_1.gcode\'))" "$1" > "$2/plate.tmp"; fi; ' +
-        '[ -s "$2/plate.tmp" ] && { head -c 65536 "$2/plate.tmp"; echo; tail -c 65536 "$2/plate.tmp"; }; rm -f "$2/plate.tmp"; true',
-      [f.path, outDir],
-      60,
+      'f=$1; t="$2/plate.tmp"; ' +
+        'if [ "$3" = gcode.3mf ]; then ' +
+        'if command -v unzip >/dev/null 2>&1; then unzip -p "$f" Metadata/plate_1.gcode > "$t" 2>/dev/null; ' +
+        'elif command -v python3 >/dev/null 2>&1; then python3 -c "$5" "$f" Metadata/plate_1.gcode > "$t"; fi; ' +
+        'f=$t; fi; ' +
+        '[ -s "$f" ] || exit 0; head -c 65536 "$f"; echo; tail -c 65536 "$f"; echo; echo @@EFFECTIVE; awk "$4" "$f"; rm -f "$t"; true',
+      [f.path, outDir, f.kind, EFFECTIVE_AWK, PY_UNZIP],
+      120,
     );
-    return text.trim() ? parseGcodeEstimate(text) : undefined;
+    if (!text.trim()) return {};
+    const at = text.indexOf("\n@@EFFECTIVE\n");
+    const head = at >= 0 ? text.slice(0, at) : text;
+    return { estimate: parseGcodeEstimate(head), effective: at >= 0 ? parseEffective(text.slice(at + 13)) : undefined };
   } catch (_e) {
-    return undefined;
+    return {};
   }
+}
+
+/// The contract's `effective` block: read back from the G-code, with the
+/// requested values where the G-code doesn't say. Pure — tested.
+export function effectiveBlock(read: EffectiveSettings | undefined, job: Pick<SliceJob, "requested" | "profiles">): SliceEffective {
+  const r = read;
+  const req = job.requested;
+  return {
+    bed_type: r?.bed_type ?? req?.bed_type ?? null,
+    bed_temp_first_layer: r?.bed_temp_first_layer ?? null,
+    bed_temp_other_layers: r?.bed_temp_other_layers ?? null,
+    nozzle_temp_first_layer: r?.nozzle_temp_first_layer ?? null,
+    nozzle_temp_other_layers: r?.nozzle_temp_other_layers ?? null,
+    brim_width: r?.brim_width ?? req?.brim?.width ?? null,
+    brim_type: r?.brim_type ?? req?.brim?.type ?? null,
+    printer_preset: r?.printer_preset ?? job.profiles.printer,
+    process_preset: r?.process_preset ?? job.profiles.process,
+    filament_preset: r?.filament_preset ?? job.profiles.filament,
+    source: r ? "gcode" : "requested",
+  };
 }
 
 /// Diagnostics for the UI: is the CLI reachable, does it need xvfb?

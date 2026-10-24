@@ -7,6 +7,7 @@ import { state, Printer, Diagnostics, loadPrinters, SETUP_DONE, openPrinter } fr
 import { TYPE_LABELS, TYPE_SHORT } from "./format";
 import { PrinterDraft, validatePrinter, printerBody } from "./validate";
 import { profilePicker } from "./profilePicker";
+import { openPrinterSettings } from "./printerSettings";
 
 const DEFAULT_PORT: Record<string, string> = { moonraker: "7125", octoprint: "80", prusalink: "80", bambu: "" };
 const HOST_HINT: Record<string, string> = {
@@ -130,6 +131,7 @@ export function printersView(onChanged: () => void): PrintersView {
         "div",
         { class: "acts" },
         btn("Controls", { cls: "sm", icon: "sliders", aria: "Open controls for " + p.name, onClick: () => openPrinter(p.id) }),
+        btn("Slicing", { cls: "sm", icon: "layers", aria: "Slicing settings for " + p.name, onClick: () => openPrinterSettings(p, refresh) }),
         testBtn,
         btn("Edit", { cls: "sm", icon: "edit", aria: "Edit " + p.name, onClick: () => openForm(p) }),
         btn("Remove", { cls: "sm danger", icon: "trash", aria: "Remove " + p.name, onClick: () => remove(p) }),
@@ -334,7 +336,8 @@ export function printersView(onChanged: () => void): PrintersView {
       if (d.type !== "bambu") typeHost.append(tlsRow);
     }
 
-    const picker = profilePicker("pf-prof", { printer: d.orca_printer_profile, filament: d.orca_filament_profile, process: d.orca_process_profile }, { allowEmpty: true });
+    // Existing printers edit presets in their slicing settings instead.
+    const picker = existing ? null : profilePicker("pf-prof", { printer: d.orca_printer_profile, filament: d.orca_filament_profile, process: d.orca_process_profile }, { allowEmpty: true });
 
     const saveBtn = btn(existing ? "Save changes" : "Add printer", { cls: "primary" });
     const reason = h("span", { class: "reason" });
@@ -353,10 +356,12 @@ export function printersView(onChanged: () => void): PrintersView {
     async function save(thenTest: boolean) {
       touched = true;
       if (!validate()) return;
-      const pv = picker.values();
-      d.orca_printer_profile = pv.printer;
-      d.orca_filament_profile = pv.filament;
-      d.orca_process_profile = pv.process;
+      if (picker) {
+        const pv = picker.values();
+        d.orca_printer_profile = pv.printer;
+        d.orca_filament_profile = pv.filament;
+        d.orca_process_profile = pv.process;
+      }
       saving = true;
       saveBtn.disabled = true;
       saveBtn.textContent = "Saving…";
@@ -401,8 +406,22 @@ export function printersView(onChanged: () => void): PrintersView {
       typeHost,
       h("hr", { class: "divider" }),
       h("p", { class: "subhead", text: "Default slicing profiles" }),
-      h("p", { class: "reason", style: { margin: "-8px 0 0" }, text: "Used when you slice for this printer without picking profiles." }),
-      picker.el,
+      existing
+        ? h(
+            "div",
+            { class: "row" },
+            h("span", { class: "reason grow", text: "Plate type, nozzle size and default presets live in this printer's slicing settings." }),
+            btn("Slicing settings…", {
+              cls: "sm",
+              icon: "layers",
+              onClick: () => {
+                m.close();
+                openPrinterSettings(existing, refresh);
+              },
+            }),
+          )
+        : h("p", { class: "reason", style: { margin: "-8px 0 0" }, text: "Used when you slice for this printer without picking profiles." }),
+      picker ? picker.el : null,
       testOut,
     );
     form.addEventListener("submit", (e) => {

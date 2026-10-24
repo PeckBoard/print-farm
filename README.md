@@ -216,11 +216,24 @@ writes light / dark / phone screenshots.
 ## MCP Tools
 
 `printer_list`, `printer_status {printer?}`, `profile_list {kind?, vendor?, query?}`,
-`slice_model {path | file_id, printer?, printer_profile?, filament_profile?, process_profile?, vendor?, arrange?, orient?}`
-→ job, `slice_status {job_id}`, `print_upload {printer, file_id}`,
+`slice_model {path | file_id, printer?, printer_profile?, filament_profile?, process_profile?, vendor?, bed_type?, brim_width?, bed_temp?, overrides?, arrange?, orient?}`
+→ job, `slice_status {job_id}` (with `effective`: plate, bed/nozzle temps and
+presets read back from the produced G-code), `print_upload {printer, file_id}`,
 `print_start` (two-phase, below), `print_control {printer, action: pause|cancel}`
 (resume is UI-only), `print_snapshot {printer, include_data?}` (saves a file;
 base64 text only on request).
+
+Settings and presets (contract: `FARM_SETTINGS_API.md`): `farm_settings_get`,
+`farm_settings_set {settings}`, `printer_settings_set {printer, settings}`,
+`profile_get {kind, name}`, `profile_save {kind, name, inherits?, own?, new_name?}`
+and `profile_delete {kind, name}` (User presets only, written to Orca's
+`user/<id>/{machine,filament,process}` dir so the Orca GUI sees them too). Every
+slice value resolves call argument → printer → farm → preset; the plate type
+always reaches Orca as `curr_bed_type` (in the process JSON — the 2.x CLI
+rejects it as a command-line option), so the filament's bed temperature for
+that plate applies. PrusaLink has no temperature API, so
+`printer_set_temperature` is unavailable there (capability false, with the
+reason).
 
 Camera images reach the agent as real MCP image blocks (the tool returns
 `_image_base64` / `_image_mime`, which core turns into `{type: "image"}`), so a

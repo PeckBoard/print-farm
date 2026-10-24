@@ -18,6 +18,8 @@ export interface ProfilePicker {
   /// Why the picker can't be used (no Orca profiles), or null.
   unavailable(): string | null;
   setError(kind: "printer" | "filament" | "process", msg: string | null): void;
+  /// A hint line under one combobox (e.g. the effective preset).
+  setHint(kind: "printer" | "filament" | "process", text: string | null): void;
 }
 
 /// Options for one kind under a vendor: the vendor's own presets, the user's
@@ -33,7 +35,11 @@ async function optionsFor(kind: "printer" | "filament" | "process", vendor: stri
   return out;
 }
 
-export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>, opts: { allowEmpty?: boolean; onChange?: () => void } = {}): ProfilePicker {
+export function profilePicker(
+  idPrefix: string,
+  initial: Partial<ProfileValues>,
+  opts: { allowEmpty?: boolean; onChange?: () => void; hints?: Partial<Record<"printer" | "filament" | "process", string>>; emptyLabel?: string } = {},
+): ProfilePicker {
   let vendors: string[] = [];
   let unavailable: string | null = "Loading profiles…";
   // Bambu machine presets live under the BBL vendor (auto-picked defaults).
@@ -43,13 +49,14 @@ export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>,
   const mk = (kind: "printer" | "filament" | "process", label: string) => {
     const c = combobox({
       id: `${idPrefix}-${kind}`,
-      placeholder: `Search ${label.toLowerCase()} profiles…`,
+      placeholder: opts.emptyLabel ? `${opts.emptyLabel} — type to search…` : `Search ${label.toLowerCase()} profiles…`,
       value: (initial as any)[kind] || "",
       allowEmpty: opts.allowEmpty,
+      emptyLabel: opts.emptyLabel,
       onChange: () => opts.onChange?.(),
     });
     c.setDisabled("Loading profiles…");
-    const f = field(label + " profile", c.el, { forId: `${idPrefix}-${kind}` });
+    const f = field(label + " profile", c.el, { forId: `${idPrefix}-${kind}`, hint: opts.hints?.[kind] });
     return { c, f };
   };
   const P = mk("printer", "Printer");
@@ -59,14 +66,20 @@ export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>,
   const note = h("div", { class: "reason" });
   note.hidden = true;
 
+  // All three lists load together (one loading state, not three staggered
+  // ones that disable a combobox mid-typing); a newer vendor pick wins.
+  let refillSeq = 0;
   const refill = async () => {
-    for (const k of ["printer", "filament", "process"] as const) {
+    const my = ++refillSeq;
+    const kinds = ["printer", "filament", "process"] as const;
+    for (const k of kinds) combos[k].c.setDisabled("Loading profiles…");
+    const lists = await Promise.all(kinds.map((k) => optionsFor(k, vendor, vendors)));
+    if (my !== refillSeq) return;
+    kinds.forEach((k, i) => {
       const { c } = combos[k];
-      c.setDisabled("Loading profiles…");
-      const list = await optionsFor(k, vendor, vendors);
-      c.setOptions(list);
-      c.setDisabled(list.length ? null : `No ${k} profiles for ${vendor}`);
-    }
+      c.setOptions(lists[i]);
+      c.setDisabled(lists[i].length ? null : `No ${k} profiles for ${vendor}`);
+    });
   };
 
   vendorSel.addEventListener("change", () => {
@@ -95,7 +108,11 @@ export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>,
         unavailable = null;
         note.hidden = true;
         vendorSel.replaceChildren(...vs.map((v) => h("option", { value: v, text: v })));
-        if (!vendor || vs.indexOf(vendor) < 0) vendor = vs[0];
+        if (!vendor || vs.indexOf(vendor) < 0) {
+          // A preset named after its vendor ("Prusa MK4 0.4 nozzle") picks it.
+          const pn = (initial.printer || "").toLowerCase();
+          vendor = (pn && vs.find((x) => x !== "User" && pn.startsWith(x.toLowerCase() + " "))) || vs[0];
+        }
         vendorSel.value = vendor;
         vendorSel.disabled = false;
         refill();
@@ -147,6 +164,16 @@ export function profilePicker(idPrefix: string, initial: Partial<ProfileValues>,
     unavailable: () => unavailable,
     setError(kind, msg) {
       combos[kind].f.setError(msg);
+    },
+    setHint(kind, text) {
+      const f = combos[kind].f.el;
+      let hint = f.querySelector<HTMLElement>(".hint");
+      if (!hint) {
+        hint = h("span", { class: "hint" });
+        f.insertBefore(hint, f.querySelector(".field-error"));
+      }
+      hint.textContent = text || "";
+      hint.hidden = !text;
     },
   };
 }

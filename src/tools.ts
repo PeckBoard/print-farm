@@ -1,7 +1,9 @@
 // MCP tool handlers. Each takes the tool arguments and returns a JSON result;
 // a thrown Error becomes `{error}` for the agent (see lib.ts).
 
-import { listPrinters, resolvePrinter, redact } from "./printers";
+import { listPrinters, resolvePrinter, redact, putPrinter } from "./printers";
+import { getFarmSettings, setFarmSettings, applyPrinterSettings, printerSettingsView, withoutIgnoredHms } from "./farmsettings";
+import { getProfile, findProfile, createProfile, updateProfile, deleteProfile } from "./userpresets";
 import { driverFor } from "./drivers";
 import { defaultTransport } from "./transport";
 import { bridgeConfig } from "./config";
@@ -64,9 +66,45 @@ export function profileList(args: any): unknown {
   if (!s(args.kind) || !s(args.vendor)) return { roots, vendors: listVendors(roots) };
   const kind = parseKind(args.kind);
   const q = s(args.query).toLowerCase();
-  const all = scanProfiles(roots, s(args.vendor), kind).filter((e) => e.instantiable);
+  const vendor = s(args.vendor);
+  const all = scanProfiles(roots, vendor, kind, vendor === "User").filter((e) => e.instantiable);
   const hits = all.filter((e) => !q || e.name.toLowerCase().includes(q)).map((e) => e.name).sort();
-  return { kind, vendor: s(args.vendor), total: hits.length, profiles: hits.slice(0, 200), truncated: hits.length > 200 };
+  return { kind, vendor, total: hits.length, profiles: hits.slice(0, 200), truncated: hits.length > 200 };
+}
+
+export function profileGet(args: any): unknown {
+  return getProfile(parseKind(args.kind), s(args.name));
+}
+
+/// Create a User preset, or update an existing one (rename with new_name).
+export function profileSave(args: any): unknown {
+  const kind = parseKind(args.kind);
+  const name = s(args.name);
+  const existing = name ? findProfile(kind, name) : null;
+  if (!existing) return { created: true, profile: createProfile(kind, { name, inherits: args.inherits, own: args.own }) };
+  const body: Record<string, unknown> = { own: args.own };
+  if (s(args.new_name)) body.name = s(args.new_name);
+  if (args.inherits !== undefined) body.inherits = args.inherits;
+  if (args.own === undefined) delete body.own;
+  return { created: false, profile: updateProfile(kind, name, body) };
+}
+
+export function profileDelete(args: any): unknown {
+  return deleteProfile(parseKind(args.kind), s(args.name));
+}
+
+export function farmSettingsGet(): unknown {
+  return getFarmSettings();
+}
+
+export function farmSettingsSet(args: any): unknown {
+  return setFarmSettings(args.settings ?? {});
+}
+
+export function printerSettingsSet(args: any): unknown {
+  const p = applyPrinterSettings(resolvePrinter(args.printer), args.settings ?? {});
+  putPrinter(p);
+  return { printer: p.id, settings: printerSettingsView(p, getFarmSettings(), driver(p).capabilities()) };
 }
 
 export function sliceModel(args: any): unknown {
@@ -85,13 +123,19 @@ export function sliceModel(args: any): unknown {
     filament_profile: s(args.filament_profile) || undefined,
     process_profile: s(args.process_profile) || undefined,
     vendor: s(args.vendor) || undefined,
-    arrange: args.arrange !== false,
-    orient: args.orient === true,
+    arrange: args.arrange,
+    orient: args.orient,
+    bed_type: args.bed_type,
+    brim_width: args.brim_width,
+    bed_temp: args.bed_temp,
+    overrides: args.overrides,
   });
   return {
     job_id: job.id,
     status: job.status,
     target: job.target,
+    profiles: job.profiles,
+    requested: job.requested,
     message: "Slicing in the background. Poll slice_status with job_id until status is succeeded or failed.",
   };
 }
@@ -204,14 +248,19 @@ export function printerCapabilities(args: any): unknown {
   return { printer: p.id, capabilities: driver(p).capabilities() };
 }
 
+/// Detail with the farm's ignored HMS codes filtered out.
+function filteredDetail(p: PrinterRecord) {
+  return withoutIgnoredHms(driver(p).detail(), getFarmSettings().monitoring.ignored_hms);
+}
+
 export function printerDetail(args: any): unknown {
   const p = resolvePrinter(args.printer);
-  return { printer: p.id, detail: driver(p).detail() };
+  return { printer: p.id, detail: filteredDetail(p) };
 }
 
 export function printerErrors(args: any): unknown {
   const p = resolvePrinter(args.printer);
-  const d = driver(p).detail();
+  const d = filteredDetail(p);
   const out: Record<string, unknown> = { printer: p.id, state: d.state, message: d.message, developer_mode: d.developer_mode, errors: d.errors };
   if (d.developer_mode === false || d.errors.some((e) => /Developer Mode/.test(e.text ?? ""))) out.hint = DEVELOPER_MODE_HINT;
   return out;
@@ -425,6 +474,12 @@ export const TOOLS: Record<string, (args: any) => unknown> = {
   printer_list: printerList,
   printer_status: printerStatus,
   profile_list: profileList,
+  profile_get: profileGet,
+  profile_save: profileSave,
+  profile_delete: profileDelete,
+  farm_settings_get: farmSettingsGet,
+  farm_settings_set: farmSettingsSet,
+  printer_settings_set: printerSettingsSet,
   slice_model: sliceModel,
   slice_status: sliceStatus,
   print_upload: printUpload,
